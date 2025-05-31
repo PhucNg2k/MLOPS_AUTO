@@ -1,0 +1,198 @@
+name: Evaluate and Deploy Model
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - 'models/**'
+      - 'src/**'
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        ref: dev
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install dvc dvc[s3]
+
+    - name: Initialize DVC
+      env:
+        DVC_REMOTE_URL: ${{ secrets.DVC_REMOTE_URL }}
+      run: |
+        python utils/dvc_operations.py --operation init
+        
+    - name: Find latest model
+      id: find_model
+      run: |
+        # Find the most recent model file
+        latest_model=$(ls -t models/model_*.pth 2>/dev/null | head -n1)
+        if [ -z "$latest_model" ]; then
+          echo "No model found in models directory"
+          exit 1
+        fi
+        echo "model_path=$latest_model" >> $GITHUB_OUTPUT
+        echo "Found latest model: $latest_model"
+    
+    - name: Download validation dataset
+      run: |
+        # Extract bucket and prefix from VALIDATE_BUCKET
+        BUCKET_PATH="${{ secrets.VALIDATE_BUCKET }}"
+        BUCKET_NAME=$(echo $BUCKET_PATH | cut -d'/' -f1)
+        PREFIX=$(echo $BUCKET_PATH | cut -d'/' -f2-)
+        
+        # Create validation directory
+        mkdir -p validation_data
+        
+        # Download validation dataset from S3
+        aws s3 sync s3://$BUCKET_PATH validation_data/
+        
+        # Verify required files exist
+        required_files=("images" "image_labels.json" "validation_set_stats.json")
+        for file in "${required_files[@]}"; do
+          if [ ! -e "./validation_data/$file" ]; then
+            echo "Error: Required validation file/directory missing: $file"
+            exit 1
+          fi
+        done
+        
+        # Log validation set info
+        echo "Validation set statistics:"
+        cat ./validation_data/validation_set_stats.json
+    
+    - name: Run evaluation
+      id: evaluate
+      run: |
+        # Run evaluation with new format
+        python src/evaluate.py \
+          --model_path ${{ steps.find_model.outputs.model_path }} \
+          --data_dir validation_data \
+          --output_dir evaluation_results \
+          --threshold 85.0
+          
+        # Store evaluation results
+        echo "metrics=$(cat evaluation_results/eval_metrics.json)" >> $GITHUB_OUTPUT
+    
+    - name: Check evaluation results
+      id: check_eval
+      run: |
+        # Parse metrics
+        metrics='${{ steps.evaluate.outputs.metrics }}'
+        current_accuracy=$(echo $metrics | python -c "import sys, json; print(json.load(sys.stdin)['test_accuracy'])")
+        threshold=85.0
+        
+        echo "Current accuracy: $current_accuracy%"
+        echo "Required threshold: $threshold%"
+        
+        # Check if accuracy meets threshold
+        if (( $(echo "$current_accuracy >= $threshold" | bc -l) )); then
+          echo "Model meets accuracy threshold! Will merge to main..."
+          echo "merge=true" >> $GITHUB_OUTPUT
+          
+          # Save detailed results
+          comparison=$(cat << EOF
+Model Evaluation Results:
+- Accuracy: ${current_accuracy}%
+- Threshold: ${threshold}%
+- Status: PASSED
+
+Full Metrics:
+$(echo $metrics | python -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))")
+EOF
+)
+          echo "comparison<<EOF" >> $GITHUB_OUTPUT
+          echo "$comparison" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        else
+          echo "Model did not meet accuracy threshold"
+          echo "merge=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Merge to main if passed
+      if: steps.check_eval.outputs.merge == 'true'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DVC_REMOTE_URL: ${{ secrets.DVC_REMOTE_URL }}
+      run: |
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "GitHub Actions"
+        
+        # Copy model to production name
+        cp ${{ steps.find_model.outputs.model_path }} models/model_production.pth
+        
+        # Track validation data with DVC
+        dvc add validation_data
+        dvc push
+        
+        # Commit changes to dev
+        git add evaluation_results/ models/model_production.pth .dvc/cache .dvcignore validation_data.dvc
+        git commit -m "Promote model to production [skip ci]
+
+        ${{ steps.check_eval.outputs.comparison }}"
+        git push origin dev
+        
+        # Switch to main and merge
+        git checkout main
+        git pull origin main
+        
+        # Ensure DVC is initialized on main
+        python utils/dvc_operations.py --operation init
+        
+        # Merge dev into main
+        git merge --no-ff dev -m "Merge dev: Model promoted to production
+
+        ${{ steps.check_eval.outputs.comparison }}"
+        
+        # Push DVC cache and data to remote
+        dvc pull
+        dvc push
+        
+        # Push changes to main
+        git push origin main
+    
+    - name: Create issue if failed
+      if: steps.check_eval.outputs.merge == 'false'
+      uses: actions/github-script@v4
+      with:
+        script: |
+          github.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: 'Model Evaluation Failed',
+            body: `Model did not meet accuracy threshold (85%)
+            
+            Evaluation Results:
+            ${process.env.METRICS}`,
+            labels: ['model-evaluation', 'failed']
+          })
+      env:
+        METRICS: ${{ steps.evaluate.outputs.metrics }}
+    
+    - name: Upload evaluation artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: evaluation-results
+        path: |
+          evaluation_results/
+          validation_data/validation_set_stats.json
+          validation_data.dvc 
