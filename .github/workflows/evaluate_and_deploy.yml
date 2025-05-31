@@ -5,8 +5,13 @@ on:
     branches:
       - dev
     paths:
-      - 'models/**'
+      - 'data/models/final/**'
       - 'src/**'
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   evaluate:
@@ -42,13 +47,19 @@ jobs:
       run: |
         python utils/dvc_operations.py --operation init
         
+    - name: Create required directories
+      run: |
+        # Create directories with proper permissions
+        mkdir -p data/models/final data/models/temp validation_data evaluation_results
+        chmod -R 755 data/models validation_data evaluation_results
+        
     - name: Find latest model
       id: find_model
       run: |
-        # Find the most recent model file
-        latest_model=$(ls -t models/model_*.pth 2>/dev/null | head -n1)
+        # Find the most recent model file in the new location
+        latest_model=$(ls -t data/models/final/model_*.pth 2>/dev/null | head -n1)
         if [ -z "$latest_model" ]; then
-          echo "No model found in models directory"
+          echo "No model found in data/models/final directory"
           exit 1
         fi
         echo "model_path=$latest_model" >> $GITHUB_OUTPUT
@@ -61,11 +72,11 @@ jobs:
         BUCKET_NAME=$(echo $BUCKET_PATH | cut -d'/' -f1)
         PREFIX=$(echo $BUCKET_PATH | cut -d'/' -f2-)
         
-        # Create validation directory
-        mkdir -p validation_data
-        
         # Download validation dataset from S3
         aws s3 sync s3://$BUCKET_PATH validation_data/
+        
+        # Set proper permissions
+        chmod -R 755 validation_data
         
         # Verify required files exist
         required_files=("images" "image_labels.json" "validation_set_stats.json")
@@ -83,6 +94,9 @@ jobs:
     - name: Run evaluation
       id: evaluate
       run: |
+        # Ensure evaluation directory has proper permissions
+        chmod -R 755 evaluation_results
+        
         # Run evaluation with new format
         python src/evaluate.py \
           --model_path ${{ steps.find_model.outputs.model_path }} \
@@ -133,15 +147,20 @@ jobs:
         git config --global user.email "github-actions@github.com"
         git config --global user.name "GitHub Actions"
         
-        # Copy model to production name
-        cp ${{ steps.find_model.outputs.model_path }} models/model_production.pth
+        # Create production models directory with proper permissions
+        mkdir -p data/models/production
+        chmod 755 data/models/production
+        
+        # Copy model to production name with proper permissions
+        cp ${{ steps.find_model.outputs.model_path }} data/models/production/model_production.pth
+        chmod 644 data/models/production/model_production.pth
         
         # Track validation data with DVC
         dvc add validation_data
         dvc push
         
         # Commit changes to dev
-        git add evaluation_results/ models/model_production.pth .dvc/cache .dvcignore validation_data.dvc
+        git add evaluation_results/ data/models/production/model_production.pth .dvc/cache .dvcignore validation_data.dvc
         git commit -m "Promote model to production [skip ci]
 
         ${{ steps.check_eval.outputs.comparison }}"
