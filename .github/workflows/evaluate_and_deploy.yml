@@ -110,19 +110,15 @@ jobs:
           echo "merge=true" >> $GITHUB_OUTPUT
           
           # Save detailed results
-          comparison=$(cat << EOF
-Model Evaluation Results:
-- Accuracy: ${current_accuracy}%
-- Threshold: ${threshold}%
-- Status: PASSED
-
-Full Metrics:
-$(echo $metrics | python -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))")
-EOF
-)
-          echo "comparison<<EOF" >> $GITHUB_OUTPUT
-          echo "$comparison" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "comparison<<EOL" >> $GITHUB_OUTPUT
+          echo "Model Evaluation Results:" >> $GITHUB_OUTPUT
+          echo "- Accuracy: ${current_accuracy}%" >> $GITHUB_OUTPUT
+          echo "- Threshold: ${threshold}%" >> $GITHUB_OUTPUT
+          echo "- Status: PASSED" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "Full Metrics:" >> $GITHUB_OUTPUT
+          echo "$metrics" | python -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))" >> $GITHUB_OUTPUT
+          echo "EOL" >> $GITHUB_OUTPUT
         else
           echo "Model did not meet accuracy threshold"
           echo "merge=false" >> $GITHUB_OUTPUT
