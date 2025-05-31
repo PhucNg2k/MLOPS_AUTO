@@ -11,7 +11,6 @@ on:
 permissions:
   contents: write
   issues: write
-  pull-requests: write
 
 jobs:
   evaluate:
@@ -39,24 +38,15 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install dvc dvc[s3]
-
-    - name: Initialize DVC
-      env:
-        DVC_REMOTE_URL: ${{ secrets.DVC_REMOTE_URL }}
-      run: |
-        python utils/dvc_operations.py --operation init
         
-    - name: Create required directories
+    - name: Create directories
       run: |
-        # Create directories with proper permissions
-        mkdir -p data/models/final data/models/temp validation_data evaluation_results
-        chmod -R 755 data/models validation_data evaluation_results
+        mkdir -p validation_data evaluation_results
+        chmod -R 755 validation_data evaluation_results
         
-    - name: Find latest model
+    - name: Find latest model and training data hash
       id: find_model
       run: |
-        # Find the most recent model file in the new location
         latest_model=$(ls -t data/models/final/model_*.pth 2>/dev/null | head -n1)
         if [ -z "$latest_model" ]; then
           echo "No model found in data/models/final directory"
@@ -64,53 +54,42 @@ jobs:
         fi
         echo "model_path=$latest_model" >> $GITHUB_OUTPUT
         echo "Found latest model: $latest_model"
+        
+        # Extract training data hash from DVC metadata file
+        dvc_meta="${latest_model}.dvc"
+        if [ -f "$dvc_meta" ]; then
+          training_hash=$(cat $dvc_meta | grep -oP 'md5: \K[a-f0-9]+')
+          echo "training_hash=$training_hash" >> $GITHUB_OUTPUT
+          echo "Found training data hash: $training_hash"
+        else
+          echo "Warning: No DVC metadata found for model, data lineage will not be tracked"
+        fi
     
     - name: Download validation dataset
       run: |
-        # Extract bucket and prefix from VALIDATE_BUCKET
         BUCKET_PATH="${{ secrets.VALIDATE_BUCKET }}"
-        BUCKET_NAME=$(echo $BUCKET_PATH | cut -d'/' -f1)
-        PREFIX=$(echo $BUCKET_PATH | cut -d'/' -f2-)
-        
-        # Download validation dataset from S3
         aws s3 sync s3://$BUCKET_PATH validation_data/
-        
-        # Set proper permissions
         chmod -R 755 validation_data
         
-        # Verify required files exist
-        required_files=("images" "image_labels.json" "validation_set_stats.json")
-        for file in "${required_files[@]}"; do
-          if [ ! -e "./validation_data/$file" ]; then
-            echo "Error: Required validation file/directory missing: $file"
-            exit 1
-          fi
-        done
-        
-        # Log validation set info
-        echo "Validation set statistics:"
-        cat ./validation_data/validation_set_stats.json
+        if [ ! -e "./validation_data/images" ] || [ ! -e "./validation_data/image_labels.json" ]; then
+          echo "Error: Required validation files missing"
+          exit 1
+        fi
     
     - name: Run evaluation
       id: evaluate
       run: |
-        # Ensure evaluation directory has proper permissions
-        chmod -R 755 evaluation_results
-        
-        # Run evaluation with new format
         python src/evaluate.py \
           --model_path ${{ steps.find_model.outputs.model_path }} \
           --data_dir validation_data \
           --output_dir evaluation_results \
           --threshold 85.0
           
-        # Store evaluation results
         echo "metrics=$(cat evaluation_results/eval_metrics.json)" >> $GITHUB_OUTPUT
     
     - name: Check evaluation results
       id: check_eval
       run: |
-        # Parse metrics
         metrics='${{ steps.evaluate.outputs.metrics }}'
         current_accuracy=$(echo $metrics | python -c "import sys, json; print(json.load(sys.stdin)['test_accuracy'])")
         threshold=85.0
@@ -118,71 +97,58 @@ jobs:
         echo "Current accuracy: $current_accuracy%"
         echo "Required threshold: $threshold%"
         
-        # Check if accuracy meets threshold
         if (( $(echo "$current_accuracy >= $threshold" | bc -l) )); then
-          echo "Model meets accuracy threshold! Will merge to main..."
           echo "merge=true" >> $GITHUB_OUTPUT
-          
-          # Save detailed results
-          echo "comparison<<EOL" >> $GITHUB_OUTPUT
-          echo "Model Evaluation Results:" >> $GITHUB_OUTPUT
-          echo "- Accuracy: ${current_accuracy}%" >> $GITHUB_OUTPUT
-          echo "- Threshold: ${threshold}%" >> $GITHUB_OUTPUT
-          echo "- Status: PASSED" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "Full Metrics:" >> $GITHUB_OUTPUT
-          echo "$metrics" | python -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))" >> $GITHUB_OUTPUT
-          echo "EOL" >> $GITHUB_OUTPUT
+          echo "Model meets accuracy threshold!"
         else
-          echo "Model did not meet accuracy threshold"
           echo "merge=false" >> $GITHUB_OUTPUT
+          echo "Model did not meet accuracy threshold"
         fi
     
-    - name: Merge to main if passed
+    - name: Deploy to production if passed
       if: steps.check_eval.outputs.merge == 'true'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        DVC_REMOTE_URL: ${{ secrets.DVC_REMOTE_URL }}
       run: |
         git config --global user.email "github-actions@github.com"
         git config --global user.name "GitHub Actions"
         
-        # Create production models directory with proper permissions
+        # Copy model and DVC metadata to production
         mkdir -p data/models/production
-        chmod 755 data/models/production
-        
-        # Copy model to production name with proper permissions
         cp ${{ steps.find_model.outputs.model_path }} data/models/production/model_production.pth
-        chmod 644 data/models/production/model_production.pth
         
-        # Track validation data with DVC
-        dvc add validation_data
-        dvc push
+        # Copy DVC metadata if exists (just the .dvc file, not the actual data)
+        if [ -f "${{ steps.find_model.outputs.model_path }}.dvc" ]; then
+          cp "${{ steps.find_model.outputs.model_path }}.dvc" data/models/production/model_production.pth.dvc
+        fi
         
-        # Commit changes to dev
-        git add evaluation_results/ data/models/production/model_production.pth .dvc/cache .dvcignore validation_data.dvc
-        git commit -m "Promote model to production [skip ci]
+        # Create a metadata file with training information
+        cat > data/models/production/training_metadata.json << EOL
+        {
+          "model_file": "model_production.pth",
+          "training_data_hash": "${{ steps.find_model.outputs.training_hash }}",
+          "accuracy": $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])'),
+          "evaluation_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+          "source_model": "$(basename ${{ steps.find_model.outputs.model_path }})"
+        }
+        EOL
+        
+        # Commit and push to main
+        git add data/models/production/model_production.pth data/models/production/model_production.pth.dvc data/models/production/training_metadata.json evaluation_results/
+        git commit -m "Deploy model to production [skip ci]
 
-        ${{ steps.check_eval.outputs.comparison }}"
-        git push origin dev
+        Evaluation Results:
+        - Accuracy: $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])')%
+        - Status: PASSED
+        - Training Data Hash: ${{ steps.find_model.outputs.training_hash }}
         
-        # Switch to main and merge
+        To reproduce training:
+        1. Checkout this commit
+        2. Use DVC to get data version: ${{ steps.find_model.outputs.training_hash }}"
+        
         git checkout main
         git pull origin main
-        
-        # Ensure DVC is initialized on main
-        python utils/dvc_operations.py --operation init
-        
-        # Merge dev into main
-        git merge --no-ff dev -m "Merge dev: Model promoted to production
-
-        ${{ steps.check_eval.outputs.comparison }}"
-        
-        # Push DVC cache and data to remote
-        dvc pull
-        dvc push
-        
-        # Push changes to main
+        git merge --no-ff dev -m "Merge dev: Deploy model to production"
         git push origin main
     
     - name: Create issue if failed
@@ -197,17 +163,15 @@ jobs:
             body: `Model did not meet accuracy threshold (85%)
             
             Evaluation Results:
-            ${process.env.METRICS}`,
+            ${process.env.METRICS}
+            
+            Training Data Hash: ${process.env.TRAINING_HASH}
+            
+            To reproduce training:
+            1. Checkout this commit
+            2. Use DVC to get data version: ${process.env.TRAINING_HASH}`,
             labels: ['model-evaluation', 'failed']
           })
       env:
         METRICS: ${{ steps.evaluate.outputs.metrics }}
-    
-    - name: Upload evaluation artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: evaluation-results
-        path: |
-          evaluation_results/
-          validation_data/validation_set_stats.json
-          validation_data.dvc 
+        TRAINING_HASH: ${{ steps.find_model.outputs.training_hash }} 
