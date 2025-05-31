@@ -12,6 +12,61 @@ from sklearn.metrics import classification_report
 import pandas as pd
 from PIL import Image
 
+def validate_data_directory(data_dir):
+    """Validate the data directory structure and contents before training."""
+    images_dir = os.path.join(data_dir, 'images')
+    labels_json = os.path.join(data_dir, 'image_labels.json')
+    
+    # Check directory existence
+    if not os.path.exists(data_dir):
+        raise ValueError(f"Data directory does not exist: {data_dir}")
+    if not os.path.exists(images_dir):
+        raise ValueError(f"Images directory does not exist: {images_dir}")
+    if not os.path.exists(labels_json):
+        raise ValueError(f"Labels file does not exist: {labels_json}")
+        
+    # Check directory permissions
+    if not os.access(data_dir, os.R_OK):
+        raise PermissionError(f"Cannot read data directory: {data_dir}")
+    if not os.access(images_dir, os.R_OK):
+        raise PermissionError(f"Cannot read images directory: {images_dir}")
+    if not os.access(labels_json, os.R_OK):
+        raise PermissionError(f"Cannot read labels file: {labels_json}")
+    
+    # Validate labels file
+    try:
+        with open(labels_json, 'r') as f:
+            labels = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in labels file: {str(e)}")
+    
+    if not isinstance(labels, dict):
+        raise ValueError("Labels file must contain a dictionary")
+    if not labels:
+        raise ValueError("Labels file is empty")
+    
+    # Validate images
+    missing_images = []
+    for img_name in labels.keys():
+        img_path = os.path.join(images_dir, img_name)
+        if not os.path.exists(img_path):
+            missing_images.append(img_name)
+        elif not os.access(img_path, os.R_OK):
+            raise PermissionError(f"Cannot read image file: {img_path}")
+            
+    if missing_images:
+        raise ValueError(f"Missing {len(missing_images)} images. First few missing: {missing_images[:5]}")
+    
+    # Validate class names
+    class_names = set(labels.values())
+    if not class_names:
+        raise ValueError("No classes found in labels file")
+    
+    print(f"Data directory validated successfully:")
+    print(f"- Found {len(labels)} images")
+    print(f"- Found {len(class_names)} classes: {sorted(class_names)}")
+    return True
+
 class ImageLabelDataset(Dataset):
     def __init__(self, images_dir, class_to_idx, samples=None, labels_json=None, transform=None):
         if samples is not None:
@@ -22,6 +77,7 @@ class ImageLabelDataset(Dataset):
             self.samples = list(labels.items())
         else:
             raise ValueError("Either samples or labels_json must be provided.")
+            
         self.images_dir = images_dir
         self.transform = transform
         self.class_to_idx = class_to_idx
@@ -30,13 +86,22 @@ class ImageLabelDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_name, class_name = self.samples[idx]
-        img_path = os.path.join(self.images_dir, img_name)
-        image = Image.open(img_path).convert('RGB')
-        label = self.class_to_idx[class_name]
-        if self.transform:
-            image = self.transform(image)
-        return image, label
+        try:
+            img_name, class_name = self.samples[idx]
+            img_path = os.path.join(self.images_dir, img_name)
+            
+            if not os.path.exists(img_path):
+                raise FileNotFoundError(f"Image not found: {img_path}")
+                
+            image = Image.open(img_path).convert('RGB')
+            label = self.class_to_idx[class_name]
+            
+            if self.transform:
+                image = self.transform(image)
+                
+            return image, label
+        except Exception as e:
+            raise RuntimeError(f"Failed to load image {img_path} at index {idx}. Error: {str(e)}")
 
 def get_class_names_from_labels(labels_json):
     with open(labels_json, 'r') as f:
@@ -45,15 +110,28 @@ def get_class_names_from_labels(labels_json):
     return class_names
 
 def train(data_dir, output_dir, epochs=10, batch_size=32, learning_rate=0.001):
+    print("Validating data directory structure...")
+    validate_data_directory(data_dir)
+    
+    print("Setting up training environment...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
 
     images_dir = os.path.join(data_dir, 'images')
     labels_json = os.path.join(data_dir, 'image_labels.json')
+    
+    print("Loading class names...")
     class_names = get_class_names_from_labels(labels_json)
     num_classes = len(class_names)
     class_to_idx = {cls: i for i, cls in enumerate(class_names)}
+    print(f"Found {num_classes} classes: {class_names}")
 
-    with open(os.path.join(output_dir, 'class_names.json'), 'w') as f:
+    # Save class names without explicit permissions
+    class_names_file = os.path.join(output_dir, 'class_names.json')
+    with open(class_names_file, 'w') as f:
         json.dump(class_names, f)
 
     train_transform = transforms.Compose([
@@ -136,7 +214,7 @@ def train(data_dir, output_dir, epochs=10, batch_size=32, learning_rate=0.001):
                 val_predictions.extend(predicted.cpu().numpy())
                 val_targets.extend(labels.cpu().numpy())
         val_acc = 100 * val_correct / val_total
-        print(f'Validation Accuracy: {val_acc:.2f}%')
+        print(f'Epoch {epoch} - Validation Accuracy: {val_acc:.2f}%')
         report = classification_report(val_targets, val_predictions,
                                     target_names=class_names,
                                     output_dict=True,

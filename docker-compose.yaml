@@ -78,6 +78,10 @@ x-airflow-common:
     
     # GitHub Configuration
     GITHUB_TOKEN: ${GITHUB_TOKEN}
+    GIT_USER_EMAIL: ${GIT_USER_EMAIL}
+    GIT_USER_NAME: ${GIT_USER_NAME}
+    GIT_REPO_URL: ${GIT_REPO_URL}
+    GIT_BRANCH: ${GIT_BRANCH:-dev}
     
     # Python path
     PYTHONPATH: /opt/airflow
@@ -204,6 +208,17 @@ services:
         mkdir -p /home/airflow/.aws
         chown "${AIRFLOW_UID}:0" /home/airflow/.aws
         chmod 700 /home/airflow/.aws
+
+        # Create and set permissions for data and models directories
+        echo "Setting up data and models directories..."
+        mkdir -p /opt/airflow/data/{training_data,models/{temp,final}}
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/data
+        chmod -R 775 /opt/airflow/data
+        
+        # Create src directory if it doesn't exist
+        mkdir -p /opt/airflow/src
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/src
+        chmod -R 775 /opt/airflow/src
         
         one_meg=1048576
         mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))

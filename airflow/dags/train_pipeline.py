@@ -12,6 +12,7 @@ import logging
 import boto3
 from airflow.hooks.S3_hook import S3Hook
 from typing import List, Set
+from datetime import datetime
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -54,8 +55,12 @@ def get_processed_partitions():
     """Get list of already processed partition folders"""
     processed_path = os.path.join(AIRFLOW_HOME, 'data', 'processed_partitions.json')
     if os.path.exists(processed_path):
-        with open(processed_path, 'r') as f:
-            return set(json.load(f))
+        try:
+            with open(processed_path, 'r') as f:
+                return set(json.load(f))
+        except Exception as e:
+            logger.error(f"Error reading processed partitions file: {str(e)}")
+            return set()
     return set()
 
 def save_processed_partition(partition):
@@ -63,9 +68,18 @@ def save_processed_partition(partition):
     processed = get_processed_partitions()
     processed.add(partition)
     processed_path = os.path.join(AIRFLOW_HOME, 'data', 'processed_partitions.json')
-    os.makedirs(os.path.dirname(processed_path), exist_ok=True)
-    with open(processed_path, 'w') as f:
-        json.dump(list(processed), f)
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(processed_path), exist_ok=True)
+        
+        # Write file directly without explicit permissions
+        with open(processed_path, 'w') as f:
+            json.dump(list(processed), f)
+            
+        logger.info(f"Successfully saved processed partition: {partition}")
+    except Exception as e:
+        logger.error(f"Error saving processed partition: {str(e)}")
+        raise
 
 def extract_partition_from_key(s3_key: str) -> str:
     """Extract partition folder name from S3 key."""
@@ -102,16 +116,28 @@ def download_partition(partition_path: str) -> str:
     # Create local directory for partition
     local_path = os.path.join(AIRFLOW_HOME, 'data', 'training_data', partition_path)
     
-    # Check if partition already exists locally
-    if os.path.exists(local_path):
-        logger.info(f"Partition already exists locally at {local_path}")
-        return local_path
-        
-    # Construct S3 path
-    s3_path = f"{os.getenv('TRAIN_BUCKET')}/{partition_path}"
-    logger.info(f"Checking S3 partition structure: {s3_path}")
-    
     try:
+        # Check if partition already exists locally and validate its structure
+        if os.path.exists(local_path):
+            # Verify the structure of existing data
+            required_files = ['images', 'image_labels.json', 'partition_stats.json']
+            missing_files = [f for f in required_files if not os.path.exists(os.path.join(local_path, f))]
+            
+            if not missing_files:
+                logger.info(f"Partition already exists locally at {local_path} with all required files")
+                return local_path
+            else:
+                logger.warning(f"Found incomplete local data. Missing: {missing_files}")
+                shutil.rmtree(local_path)
+                logger.info("Removed incomplete local data")
+        
+        # Create directory for download
+        os.makedirs(local_path, exist_ok=True)
+        
+        # Construct S3 path
+        s3_path = f"{os.getenv('TRAIN_BUCKET')}/{partition_path}"
+        logger.info(f"Checking S3 partition structure: {s3_path}")
+        
         # Use Airflow's S3 hook
         s3 = s3_hook.get_conn()
         
@@ -150,9 +176,6 @@ def download_partition(partition_path: str) -> str:
             raise ValueError(f"Invalid partition structure in S3. Missing: {', '.join(missing_items)}")
             
         logger.info("S3 partition structure validated successfully")
-        
-        # Create directory for download
-        os.makedirs(local_path, exist_ok=True)
             
         # Get AWS credentials from Airflow connection
         aws_creds = s3_hook.get_credentials()
@@ -162,19 +185,34 @@ def download_partition(partition_path: str) -> str:
         if aws_creds.token:
             env['AWS_SESSION_TOKEN'] = aws_creds.token
             
-        logger.info(f"Downloading validated partition from S3: {s3_path}")
-        # Use --recursive to ensure folder download, and --no-sign-request if public bucket (not needed here)
+        # Download files using aws cli
         result = subprocess.run([
             'aws', 's3', 'cp', s3_path, local_path, '--recursive'
         ], capture_output=True, text=True, check=False, env=env)
-        if result.returncode != 0:
-            logger.error(f"AWS CLI error (stdout): {result.stdout}")
-            logger.error(f"AWS CLI error (stderr): {result.stderr}")
-            if os.path.exists(local_path):
-                shutil.rmtree(local_path)
-            raise RuntimeError(f"Failed to download partition: aws s3 cp exited with {result.returncode}")
         
-        logger.info(f"Successfully downloaded partition to {local_path}")
+        # Check if the error is only about utime
+        if result.returncode != 0:
+            stderr_lines = result.stderr.splitlines()
+            only_utime_warnings = all(
+                "unable to update the last modified time" in line 
+                for line in stderr_lines 
+                if not line.startswith("Completed")
+            )
+            
+            if not only_utime_warnings:
+                logger.error(f"AWS CLI error (stdout): {result.stdout}")
+                logger.error(f"AWS CLI error (stderr): {result.stderr}")
+                raise RuntimeError(f"Failed to download partition: aws s3 cp exited with {result.returncode}")
+            else:
+                logger.warning("Ignoring utime warnings as files were downloaded successfully")
+        
+        # Basic validation of downloaded data
+        required_files = ['images', 'image_labels.json', 'partition_stats.json']
+        missing_files = [f for f in required_files if not os.path.exists(os.path.join(local_path, f))]
+        if missing_files:
+            raise ValueError(f"Download incomplete. Missing files: {missing_files}")
+        
+        logger.info(f"Successfully downloaded partition at {local_path}")
         return local_path
         
     except Exception as e:
@@ -265,83 +303,125 @@ def train_model(partition_path: str, **context) -> str:
     Returns:
         str: Path to saved model
     """
-    import subprocess
-    from datetime import datetime
-    import shutil
-
-    # Set up model directories
-    temp_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models')
-    git_model_dir = os.path.join(AIRFLOW_HOME, 'models')
-    os.makedirs(temp_model_dir, exist_ok=True)
-    os.makedirs(git_model_dir, exist_ok=True)
-
-    # Generate model filename with timestamp
-    model_filename = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
-    temp_model_path = os.path.join(temp_model_dir, model_filename)
-    final_model_path = os.path.join(git_model_dir, model_filename)
-
-    # Start MLflow run
-    with mlflow.start_run(run_name=f"train_{os.path.basename(partition_path)}"):
-        # Run training script with correct arguments
-        train_script = os.path.join(AIRFLOW_HOME, 'src', 'train.py')
-        cmd = [
-            'python', train_script,
-            '--data_dir', partition_path,
-            '--output_dir', temp_model_dir
-        ]
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Training subprocess failed!\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
-            raise
-
-        # Log command output to MLflow
-        mlflow.log_param("training_output", result.stdout)
-        if result.stderr:
-            mlflow.log_param("training_errors", result.stderr)
-
-        # Copy model to git-tracked directory
-        # (Assume best_model.pth is the output from train.py)
-        best_model_path = os.path.join(temp_model_dir, 'best_model.pth')
-        if os.path.exists(best_model_path):
-            shutil.copy2(best_model_path, final_model_path)
-        else:
-            raise FileNotFoundError(f"Expected model file not found: {best_model_path}")
-
-        # Setup git for commit
-        git_email = os.getenv('GIT_USER_EMAIL')
-        git_name = os.getenv('GIT_USER_NAME')
-        git_branch = os.getenv('GIT_BRANCH', 'dev')
-
-        logger.info(f"Configuring git with user {git_name}")
-        subprocess.run(['git', 'config', '--global', 'user.email', git_email], check=True)
-        subprocess.run(['git', 'config', '--global', 'user.name', git_name], check=True)
-
-        # Configure git repository
-        if os.getenv('GIT_REPO_URL'):
-            logger.info("Setting git remote URL")
+    try:
+        # Set up model directories - using paths within Airflow workspace
+        temp_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models', 'temp')
+        git_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models', 'final')
+        
+        # Create directories with proper permissions
+        for dir_path in [temp_model_dir, git_model_dir]:
             try:
-                subprocess.run(['git', 'remote', 'add', 'origin', os.getenv('GIT_REPO_URL')], check=True)
-            except subprocess.CalledProcessError:
-                subprocess.run(['git', 'remote', 'set-url', 'origin', os.getenv('GIT_REPO_URL')], check=True)
+                os.makedirs(dir_path, mode=0o755, exist_ok=True)
+                logger.info(f"Created directory: {dir_path}")
+            except Exception as e:
+                logger.error(f"Error creating directory {dir_path}: {str(e)}")
+                raise
 
-        # Commit new model
-        subprocess.run(['git', 'add', final_model_path], check=True)
-        commit_msg = f"Add new model trained on {os.path.basename(partition_path)}"
-        subprocess.run(['git', 'commit', '-m', commit_msg], check=True)
+        # Generate model filename with timestamp
+        model_filename = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
+        temp_model_path = os.path.join(temp_model_dir, model_filename)
+        final_model_path = os.path.join(git_model_dir, model_filename)
 
-        # Configure git credentials securely using git credential helper
-        if os.getenv('GITHUB_TOKEN') and os.getenv('GIT_REPO_URL', '').startswith('https://'):
-            git_cred_cmd = f"""
-            echo -e "protocol=https\nhost=github.com\nusername=x-access-token\npassword={os.getenv('GITHUB_TOKEN')}" | git credential approve
-            """
-            subprocess.run(git_cred_cmd, shell=True, check=True)
+        # Start MLflow run
+        with mlflow.start_run(run_name=f"train_{os.path.basename(partition_path)}"):
+            # Run training script with correct arguments
+            train_script = os.path.join(AIRFLOW_HOME, 'src', 'train.py')
+            cmd = [
+                'python', train_script,
+                '--data_dir', partition_path,
+                '--output_dir', temp_model_dir
+            ]
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                logger.info("Training script completed successfully")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Training subprocess failed!\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+                raise
 
-        # Push to the specified branch
-        logger.info(f"Pushing to {git_branch} branch")
-        subprocess.run(['git', 'push', 'origin', git_branch], check=True)
+            # Log command output to MLflow
+            mlflow.log_param("training_output", result.stdout)
+            if result.stderr:
+                mlflow.log_param("training_errors", result.stderr)
 
-    return final_model_path
+            # Copy model to git-tracked directory using simple file read/write
+            best_model_path = os.path.join(temp_model_dir, 'best_model.pth')
+            if os.path.exists(best_model_path):
+                try:
+                    with open(best_model_path, 'rb') as src, open(final_model_path, 'wb') as dst:
+                        dst.write(src.read())
+                    logger.info(f"Copied model from {best_model_path} to {final_model_path}")
+                except Exception as e:
+                    logger.error(f"Error copying model file: {str(e)}")
+                    raise
+            else:
+                raise FileNotFoundError(f"Expected model file not found: {best_model_path}")
+
+            # Setup git for commit
+            git_email = os.getenv('GIT_USER_EMAIL')
+            git_name = os.getenv('GIT_USER_NAME')
+            git_branch = os.getenv('GIT_BRANCH', 'dev')
+            github_token = os.getenv('GITHUB_TOKEN')
+            git_repo_url = os.getenv('GIT_REPO_URL')
+
+            # Verify git environment variables
+            if not all([git_email, git_name, github_token, git_repo_url]):
+                logger.warning("Missing git configuration environment variables. Skipping git operations.")
+                return final_model_path
+
+            logger.info(f"Configuring git with user {git_name} ({git_email})")
+            
+            try:
+                # Initialize git repository if not already initialized
+                if not os.path.exists(os.path.join(git_model_dir, '.git')):
+                    subprocess.run(['git', 'init'], cwd=git_model_dir, check=True)
+                    logger.info("Initialized new git repository")
+                
+                # Configure git globally
+                subprocess.run(['git', 'config', '--global', 'user.email', git_email], check=True)
+                subprocess.run(['git', 'config', '--global', 'user.name', git_name], check=True)
+                
+                # Set up credential helper to store token
+                subprocess.run(['git', 'config', '--global', 'credential.helper', 'store'], check=True)
+                
+                # Save credentials
+                cred_file = os.path.expanduser('~/.git-credentials')
+                with open(cred_file, 'w') as f:
+                    f.write(f"https://x-access-token:{github_token}@github.com\n")
+                os.chmod(cred_file, 0o600)
+
+                # Configure repository
+                try:
+                    subprocess.run(['git', 'remote', 'add', 'origin', git_repo_url], cwd=git_model_dir, check=True)
+                except subprocess.CalledProcessError:
+                    subprocess.run(['git', 'remote', 'set-url', 'origin', git_repo_url], cwd=git_model_dir, check=True)
+                
+                # Try to commit and push
+                try:
+                    # Add and commit the model file
+                    subprocess.run(['git', 'add', final_model_path], cwd=git_model_dir, check=True)
+                    commit_msg = f"Add new model trained on {os.path.basename(partition_path)}"
+                    subprocess.run(['git', 'commit', '-m', commit_msg], cwd=git_model_dir, check=True)
+                    
+                    # Create and checkout the branch if it doesn't exist
+                    try:
+                        subprocess.run(['git', 'checkout', git_branch], cwd=git_model_dir, check=True)
+                    except subprocess.CalledProcessError:
+                        subprocess.run(['git', 'checkout', '-b', git_branch], cwd=git_model_dir, check=True)
+                    
+                    # Push to the specified branch
+                    logger.info(f"Pushing to {git_branch} branch")
+                    subprocess.run(['git', 'push', '-u', 'origin', git_branch], cwd=git_model_dir, check=True)
+                    logger.info("Successfully pushed model to repository")
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"Git commit/push failed but model was saved successfully: {str(e)}")
+            except Exception as e:
+                logger.warning(f"Git configuration failed but model was saved successfully: {str(e)}")
+
+            return final_model_path
+
+    except Exception as e:
+        logger.error(f"Error in train_model: {str(e)}")
+        raise
 
 def cleanup(**context):
     """
@@ -356,28 +436,48 @@ def cleanup(**context):
     - Temporary validation data (can be re-downloaded)
     - Any temporary files from training
     """
-    # Only clean validation data as it can be re-downloaded
-    validation_dir = os.path.join(AIRFLOW_HOME, 'data', 'validation_data')
-    if os.path.exists(validation_dir):
-        logger.info(f"Cleaning validation data directory: {validation_dir}")
-        shutil.rmtree(validation_dir)
-    
-    # Clean any temporary training artifacts
-    temp_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models')
-    if os.path.exists(temp_model_dir):
-        logger.info(f"Cleaning temporary model directory: {temp_model_dir}")
-        shutil.rmtree(temp_model_dir)
-    
-    logger.info("Preserved directories for analysis:")
-    logger.info(f"- Training data: {os.path.join(AIRFLOW_HOME, 'data', 'training_data')}")
-    logger.info(f"- Final models: {os.path.join(AIRFLOW_HOME, 'models')}")
-    logger.info(f"- Evaluation results: {os.path.join(AIRFLOW_HOME, 'data', 'evaluation_results')}")
+    try:
+        # Only clean validation data as it can be re-downloaded
+        validation_dir = os.path.join(AIRFLOW_HOME, 'data', 'validation_data')
+        if os.path.exists(validation_dir):
+            logger.info(f"Cleaning validation data directory: {validation_dir}")
+            try:
+                shutil.rmtree(validation_dir)
+            except PermissionError:
+                logger.warning(f"Could not remove validation directory: {validation_dir}")
+        
+        # Clean any temporary training artifacts
+        temp_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models', 'temp')
+        if os.path.exists(temp_model_dir):
+            logger.info(f"Cleaning temporary model directory: {temp_model_dir}")
+            try:
+                shutil.rmtree(temp_model_dir)
+            except PermissionError:
+                logger.warning(f"Could not remove temp model directory: {temp_model_dir}")
+        
+        # List preserved directories for logging
+        preserved_dirs = [
+            os.path.join(AIRFLOW_HOME, 'data', 'training_data'),
+            os.path.join(AIRFLOW_HOME, 'data', 'models', 'final'),
+            os.path.join(AIRFLOW_HOME, 'data', 'evaluation_results')
+        ]
+        
+        logger.info("Preserved directories for analysis:")
+        for dir_path in preserved_dirs:
+            if os.path.exists(dir_path):
+                logger.info(f"- {dir_path}")
+            
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+        # Don't raise the error since cleanup is not critical
+        # Just log it and continue
+    return None
 
 with DAG(
-    'animal_classification_training_v11',
+    'animal_classification_training_v16',
     default_args=default_args,
     description='Train animal classification model on new partitions',
-    schedule_interval='*/10 * * * *',  # Run every 5 minutes
+    schedule_interval='0 */2 * * *',  # Run every 2 hours
     catchup=False
 ) as dag:
 
@@ -482,9 +582,13 @@ with DAG(
         if not partition_path:
             logger.info("No partition to train on. Skipping.")
             return None
-        model_path = train_model(partition_path, **context)
-        logger.info(f"[DEBUG] train_model: Passing model path '{model_path}' to downstream task.")
-        return model_path
+        try:
+            model_path = train_model(partition_path, **context)
+            logger.info(f"[DEBUG] train_model: Passing model path '{model_path}' to downstream task.")
+            return model_path
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Training failed with error:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+            raise
 
     train_task = PythonOperator(
         task_id='train_model',
