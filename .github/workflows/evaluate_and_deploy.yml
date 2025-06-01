@@ -140,8 +140,20 @@ jobs:
         git checkout -b temp-merge
         
         # Remove everything except .dvc files and evaluation results
+        # First, remove all tracked files
         git rm -rf .
-        git checkout dev -- data/models/final/*.dvc evaluation_results/
+        
+        # Then restore .dvc files
+        git checkout dev -- data/models/final/*.dvc
+        
+        # Copy evaluation results (if they exist)
+        if [ -d "evaluation_results" ]; then
+          mkdir -p evaluation_results_temp
+          cp -r evaluation_results/* evaluation_results_temp/
+          rm -rf evaluation_results
+          mv evaluation_results_temp evaluation_results
+          git add evaluation_results/
+        fi
         
         # Commit the cleaned state
         git commit -m "Clean state for main branch"
