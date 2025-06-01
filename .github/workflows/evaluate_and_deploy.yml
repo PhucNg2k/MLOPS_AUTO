@@ -56,8 +56,18 @@ jobs:
         
         # Get model path from DVC file name
         model_path="${latest_dvc%.dvc}"
+        
+        # Initialize DVC and configure remote
+        dvc init --no-scm
+        dvc remote add -f storage ${{ secrets.DVC_REMOTE_URL }}
+        dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+        dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        
+        # Pull model from DVC
+        dvc pull "$latest_dvc"
+        
         if [ ! -f "$model_path" ]; then
-          echo "Model file not found: $model_path"
+          echo "Failed to pull model file: $model_path"
           exit 1
         fi
         
@@ -127,9 +137,8 @@ jobs:
         dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
         dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         
-        # Track and push production model to S3
+        # Track production model with DVC (no push needed, using same remote)
         dvc add data/models/production/model_production.pth
-        dvc push
         
         # Create and push metadata
         cat > data/models/production/training_metadata.json << EOL
@@ -142,7 +151,6 @@ jobs:
         }
         EOL
         dvc add data/models/production/training_metadata.json
-        dvc push
         
         # Only push hashes to GitHub main
         rm data/models/production/model_production.pth
