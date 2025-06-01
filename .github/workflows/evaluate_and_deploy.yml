@@ -104,18 +104,22 @@ jobs:
           --output_dir evaluation_results \
           --threshold 85.0
           
-        echo "metrics=$(cat evaluation_results/eval_metrics.json)" >> $GITHUB_OUTPUT
+        # Read and format metrics properly for GitHub Actions output
+        metrics=$(cat evaluation_results/eval_metrics.json | tr -d '\n\r')
+        echo "metrics=${metrics}" >> $GITHUB_OUTPUT
     
     - name: Check evaluation results
       id: check_eval
       run: |
+        # Parse metrics using Python to handle JSON properly
         metrics='${{ steps.evaluate.outputs.metrics }}'
-        current_accuracy=$(echo $metrics | python -c "import sys, json; print(json.load(sys.stdin)['test_accuracy'])")
+        current_accuracy=$(echo "$metrics" | python3 -c "import sys, json; print(json.load(sys.stdin)['test_accuracy'])")
         threshold=85.0
         
         echo "Current accuracy: $current_accuracy%"
         echo "Required threshold: $threshold%"
         
+        # Use bc for floating point comparison
         if (( $(echo "$current_accuracy >= $threshold" | bc -l) )); then
           echo "merge=true" >> $GITHUB_OUTPUT
           echo "Model meets accuracy threshold!"

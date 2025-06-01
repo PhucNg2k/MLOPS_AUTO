@@ -12,8 +12,9 @@ import logging
 import boto3
 from airflow.hooks.S3_hook import S3Hook
 from typing import List, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 from airflow.operators.bash import BashOperator
+from airflow.exceptions import AirflowFailException
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -497,13 +498,15 @@ with DAG(
     # 2. Check if partition is already processed (redundant, but keeps logic modular)
     def check_partition_not_processed(partition, **context):
         if not partition:
-            logger.info("No partition to process. Skipping downstream tasks.")
-            return None
+            logger.info("No new partition found in S3.")
+            raise AirflowFailException("No new partition found to process. Failing the DAG run.")
+            
         processed = get_processed_partitions()
         if partition in processed:
-            logger.info(f"Partition {partition} already processed. Skipping.")
-            return None
-        logger.info(f"[DEBUG] check_partition_not_processed: Passing partition '{partition}' to downstream task.")
+            logger.info(f"Partition {partition} already processed.")
+            raise AirflowFailException("Selected partition was already processed. Failing the DAG run.")
+            
+        logger.info(f"Processing partition: {partition}")
         return partition
 
     check_partition_task = PythonOperator(
@@ -529,7 +532,11 @@ with DAG(
         python_callable=download_partition_with_log,
         op_kwargs={
             'partition_path': "{{ task_instance.xcom_pull(task_ids='check_partition_not_processed') }}"
-        }
+        },
+        retries=2,  # Retry 2 times
+        retry_delay=timedelta(minutes=1),  # Wait 1 minute between retries
+        retry_exponential_backoff=True,  # Exponentially increase delay between retries
+        max_retry_delay=timedelta(minutes=5)  # Cap the delay at 5 minutes
     )
 
     # 4. Version with DVC
