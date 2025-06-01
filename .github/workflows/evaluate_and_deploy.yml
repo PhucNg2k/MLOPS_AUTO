@@ -44,7 +44,7 @@ jobs:
         mkdir -p validation_data evaluation_results
         chmod -R 755 validation_data evaluation_results
         
-    - name: Find latest model and training data hash
+    - name: Find latest model and download from S3
       id: find_model
       run: |
         # Find latest DVC file first
@@ -54,30 +54,20 @@ jobs:
           exit 1
         fi
         
-        # Get model path from DVC file name
-        model_path="${latest_dvc%.dvc}"
+        # Get model filename from DVC file name
+        model_filename=$(basename "${latest_dvc%.dvc}")
+        echo "Found latest model DVC file: $latest_dvc for model: $model_filename"
         
-        # Initialize DVC and configure remote
-        dvc init --no-scm
-        dvc remote add -f storage ${{ secrets.DVC_REMOTE_URL }}
-        dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
-        dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # Download model file directly from S3
+        aws s3 cp "${{ secrets.DVC_REMOTE_URL }}/$model_filename" "data/models/final/$model_filename"
         
-        # Pull model from DVC
-        dvc pull "$latest_dvc"
-        
-        if [ ! -f "$model_path" ]; then
-          echo "Failed to pull model file: $model_path"
+        if [ ! -f "data/models/final/$model_filename" ]; then
+          echo "Failed to download model file from S3"
           exit 1
         fi
         
-        echo "model_path=$model_path" >> $GITHUB_OUTPUT
-        echo "Found latest model: $model_path"
-        
-        # Extract training data hash from DVC metadata file
-        training_hash=$(cat $latest_dvc | grep -oP 'md5: \K[a-f0-9]+')
-        echo "training_hash=$training_hash" >> $GITHUB_OUTPUT
-        echo "Found training data hash: $training_hash"
+        echo "model_path=data/models/final/$model_filename" >> $GITHUB_OUTPUT
+        echo "Found and downloaded latest model: $model_filename"
     
     - name: Download validation dataset
       run: |
@@ -127,47 +117,31 @@ jobs:
         git config --global user.email "github-actions@github.com"
         git config --global user.name "GitHub Actions"
         
-        # Setup production directory
-        mkdir -p data/models/production
-        cp ${{ steps.find_model.outputs.model_path }} data/models/production/model_production.pth
+        # Prepare what to merge to main - only .dvc files and evaluation results
+        git checkout -b temp-merge
         
-        # Initialize DVC and configure remote
-        dvc init --no-scm
-        dvc remote add -f storage ${{ secrets.DVC_REMOTE_URL }}
-        dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
-        dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # Remove everything except .dvc files and evaluation results
+        git rm -rf .
+        git checkout dev -- data/models/final/*.dvc evaluation_results/
         
-        # Track production model with DVC (no push needed, using same remote)
-        dvc add data/models/production/model_production.pth
+        # Commit the cleaned state
+        git commit -m "Clean state for main branch"
         
-        # Create and push metadata
-        cat > data/models/production/training_metadata.json << EOL
-        {
-          "model_file": "model_production.pth",
-          "training_data_hash": "${{ steps.find_model.outputs.training_hash }}",
-          "accuracy": $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])'),
-          "evaluation_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-          "source_model": "$(basename ${{ steps.find_model.outputs.model_path }})"
-        }
-        EOL
-        dvc add data/models/production/training_metadata.json
-        
-        # Only push hashes to GitHub main
-        rm data/models/production/model_production.pth
-        rm data/models/production/training_metadata.json
-        git add data/models/production/*.dvc evaluation_results/
-        
-        git commit -m "Deploy model to production [skip ci]
+        # Switch to main and merge the clean state
+        git checkout main
+        git pull origin main
+        git merge --no-ff temp-merge -m "Merge validated model to production
 
         Evaluation Results:
         - Accuracy: $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])')%
         - Status: PASSED
-        - Training Data Hash: ${{ steps.find_model.outputs.training_hash }}"
+        - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
         
-        git checkout main
-        git pull origin main
-        git merge --no-ff dev -m "Merge dev: Deploy model to production"
+        # Push to main
         git push origin main
+        
+        # Cleanup temp branch
+        git branch -D temp-merge
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
@@ -183,13 +157,10 @@ jobs:
             Evaluation Results:
             ${process.env.METRICS}
             
-            Training Data Hash: ${process.env.TRAINING_HASH}
-            
-            To reproduce training:
+            To reproduce:
             1. Checkout this commit
-            2. Use DVC to get data version: ${process.env.TRAINING_HASH}`,
+            2. See .dvc file for model version`,
             labels: ['model-evaluation', 'failed']
           })
       env:
-        METRICS: ${{ steps.evaluate.outputs.metrics }}
-        TRAINING_HASH: ${{ steps.find_model.outputs.training_hash }} 
+        METRICS: ${{ steps.evaluate.outputs.metrics }} 
