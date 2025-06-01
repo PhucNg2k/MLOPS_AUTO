@@ -360,15 +360,16 @@ def cleanup(**context):
     
     We keep:
     - Training data (for reproducibility)
-    - Models (for versioning)
+    - .dvc files (for model version tracking)
     - Evaluation results (for analysis and MLflow)
     
     We clean:
     - Temporary validation data (can be re-downloaded)
     - Any temporary files from training
+    - .pth model files (can be retrieved using DVC)
     """
     try:
-        # Only clean validation data as it can be re-downloaded
+        # Clean validation data as it can be re-downloaded
         validation_dir = os.path.join(AIRFLOW_HOME, 'data', 'validation_data')
         if os.path.exists(validation_dir):
             logger.info(f"Cleaning validation data directory: {validation_dir}")
@@ -385,11 +386,23 @@ def cleanup(**context):
                 shutil.rmtree(temp_model_dir)
             except PermissionError:
                 logger.warning(f"Could not remove temp model directory: {temp_model_dir}")
+
+        # Clean .pth files from final models directory while keeping .dvc files
+        final_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models', 'final')
+        if os.path.exists(final_model_dir):
+            logger.info(f"Cleaning .pth files from final model directory: {final_model_dir}")
+            try:
+                for file in os.listdir(final_model_dir):
+                    if file.endswith('.pth'):
+                        file_path = os.path.join(final_model_dir, file)
+                        os.remove(file_path)
+                        logger.info(f"Removed model file: {file}")
+            except Exception as e:
+                logger.warning(f"Error while removing .pth files: {str(e)}")
         
-        # List preserved directories for logging
+        # List preserved directories and files for logging
         preserved_dirs = [
             os.path.join(AIRFLOW_HOME, 'data', 'training_data'),
-            os.path.join(AIRFLOW_HOME, 'data', 'models', 'final'),
             os.path.join(AIRFLOW_HOME, 'data', 'evaluation_results')
         ]
         
@@ -397,6 +410,11 @@ def cleanup(**context):
         for dir_path in preserved_dirs:
             if os.path.exists(dir_path):
                 logger.info(f"- {dir_path}")
+
+        # Log preserved .dvc files
+        if os.path.exists(final_model_dir):
+            dvc_files = [f for f in os.listdir(final_model_dir) if f.endswith('.dvc')]
+            logger.info(f"Preserved {len(dvc_files)} .dvc files for model tracking")
             
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -529,7 +547,7 @@ with DAG(
         }
     )
 
-    # Add git push task - Only push model and DVC tracking for evaluation
+    # Add git push task - Only push .dvc file to GitHub, actual model goes to S3
     git_push = BashOperator(
         task_id='git_push',
         bash_command=f"""
@@ -550,21 +568,20 @@ with DAG(
             # Ensure directory exists and copy with full path structure
             mkdir -p data/models/final && \
             
-            # Clean up old files in git repository only (dev branch)
-            find data/models/final/ -name "model_*.pth" -o -name "model_*.pth.dvc" -delete && \
-            
-            # Copy new model and track with DVC
+            # Copy new model
             cp "$latest_model" "data/models/final/$(basename $latest_model)" && \
             
-            # Initialize DVC and add remote
+            # Initialize DVC and track the model file (no remote needed)
             dvc init --no-scm && \
-            dvc remote add -f storage $DVC_REMOTE_URL && \
-            
-            # Track model with DVC (no push to S3 - will be done by GitHub Actions)
             dvc add "data/models/final/$(basename $latest_model)" && \
             
-            # Add both .pth and .dvc files (workflow needs .pth for inference)
-            git add -f "data/models/final/$(basename $latest_model)" && \
+            # Upload model to S3 directly using AWS CLI
+            aws s3 cp "data/models/final/$(basename $latest_model)" "$DVC_REMOTE_URL/$(basename $latest_model)" && \
+            
+            # Remove the .pth file, keep only .dvc
+            rm "data/models/final/$(basename $latest_model)" && \
+            
+            # Add the .dvc file to git (with -f to override gitignore)
             git add -f "data/models/final/$(basename $latest_model).dvc" && \
             
             # Add pipeline code for version tracking
@@ -594,10 +611,10 @@ with DAG(
             fi && \
             
             # Commit and push
-            git commit -m "Add model for evaluation
+            git commit -m "Add model tracking for evaluation
             
             Model: $(basename $latest_model)
-            Note: Model files will be pushed to S3 after validation" && \
+            Note: Model file uploaded to S3" && \
             git remote set-url origin "https://$GITHUB_TOKEN@github.com/$GIT_REPO_NAME" && \
             git push origin $GIT_BRANCH && \
             
@@ -611,7 +628,10 @@ with DAG(
             'GITHUB_TOKEN': os.getenv('GITHUB_TOKEN'),
             'GIT_REPO_NAME': os.getenv('GIT_REPO_URL').split('github.com/')[-1].rstrip('.git'),
             'DVC_REMOTE_URL': os.getenv('DVC_REMOTE_URL'),
-            'PATH': os.getenv('PATH'),  # Ensure DVC is available
+            'AWS_ACCESS_KEY_ID': os.getenv('AWS_ACCESS_KEY_ID'),
+            'AWS_SECRET_ACCESS_KEY': os.getenv('AWS_SECRET_ACCESS_KEY'),
+            'AWS_DEFAULT_REGION': os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
+            'PATH': os.getenv('PATH'),  # Ensure AWS CLI and DVC are available
             'HOME': '/home/airflow'  # Set HOME for git config
         }
     )
