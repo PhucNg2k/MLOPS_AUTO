@@ -54,22 +54,20 @@ jobs:
           exit 1
         fi
         
-        # Extract model path from DVC file
-        model_path="${latest_dvc%.dvc}"  # Remove .dvc extension
-        echo "model_path=$model_path" >> $GITHUB_OUTPUT
-        echo "Found latest model DVC: $latest_dvc"
+        # Get model path from DVC file name
+        model_path="${latest_dvc%.dvc}"
+        if [ ! -f "$model_path" ]; then
+          echo "Model file not found: $model_path"
+          exit 1
+        fi
         
-        # Pull the actual model file using DVC
-        dvc pull "$latest_dvc"
+        echo "model_path=$model_path" >> $GITHUB_OUTPUT
+        echo "Found latest model: $model_path"
         
         # Extract training data hash from DVC metadata file
-        if [ -f "$latest_dvc" ]; then
-          training_hash=$(cat $latest_dvc | grep -oP 'md5: \K[a-f0-9]+')
-          echo "training_hash=$training_hash" >> $GITHUB_OUTPUT
-          echo "Found training data hash: $training_hash"
-        else
-          echo "Warning: No DVC metadata found for model, data lineage will not be tracked"
-        fi
+        training_hash=$(cat $latest_dvc | grep -oP 'md5: \K[a-f0-9]+')
+        echo "training_hash=$training_hash" >> $GITHUB_OUTPUT
+        echo "Found training data hash: $training_hash"
     
     - name: Download validation dataset
       run: |
@@ -123,13 +121,13 @@ jobs:
         mkdir -p data/models/production
         cp ${{ steps.find_model.outputs.model_path }} data/models/production/model_production.pth
         
-        # 1. Push actual files to S3 via DVC
+        # Initialize DVC and configure remote
         dvc init --no-scm
         dvc remote add -f storage ${{ secrets.DVC_REMOTE_URL }}
         dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
         dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         
-        # Track and push model file to S3
+        # Track and push production model to S3
         dvc add data/models/production/model_production.pth
         dvc push
         
@@ -146,7 +144,7 @@ jobs:
         dvc add data/models/production/training_metadata.json
         dvc push
         
-        # 2. Only push hashes to GitHub main
+        # Only push hashes to GitHub main
         rm data/models/production/model_production.pth
         rm data/models/production/training_metadata.json
         git add data/models/production/*.dvc evaluation_results/

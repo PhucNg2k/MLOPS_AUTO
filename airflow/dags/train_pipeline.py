@@ -529,67 +529,90 @@ with DAG(
         }
     )
 
-    # Add git push task
+    # Add git push task - Only push model and DVC tracking for evaluation
     git_push = BashOperator(
         task_id='git_push',
         bash_command=f"""
-            # Set HOME and create a temporary working directory
-            export HOME=/home/airflow && \
+            # Create and move to a temporary directory
             TEMP_DIR=$(mktemp -d) && \
-            
-            # Clone the repository to temporary directory
-            git clone https://$GITHUB_TOKEN@github.com/$GIT_REPO_NAME $TEMP_DIR && \
             cd $TEMP_DIR && \
-            git checkout $GIT_BRANCH && \
             
             # Configure git
             git config --global user.email "$GIT_USER_EMAIL" && \
             git config --global user.name "$GIT_USER_NAME" && \
             
-            # Copy model from Airflow to temp directory
+            # Clone the repository (using token)
+            git clone "https://$GITHUB_TOKEN@github.com/$GIT_REPO_NAME" . && \
+            
+            # Get the latest model file and copy it with proper path
+            latest_model=$(ls -t {AIRFLOW_HOME}/data/models/final/model_*.pth | head -n1) && \
+            
+            # Ensure directory exists and copy with full path structure
             mkdir -p data/models/final && \
-            cp -r {PROJECT_ROOT}/data/models/final/* data/models/final/ && \
             
-            # Setup gitignore
-            echo ".dvc/config.local" >> .gitignore && \
-            git add .gitignore && \
+            # Clean up old files in git repository only (dev branch)
+            find data/models/final/ -name "model_*.pth" -o -name "model_*.pth.dvc" -delete && \
             
-            # Get the latest model file
-            latest_model=$(ls -t data/models/final/model_*.pth | head -n1) && \
+            # Copy new model and track with DVC
+            cp "$latest_model" "data/models/final/$(basename $latest_model)" && \
             
-            # Initialize DVC and add model for tracking (no push)
+            # Initialize DVC and add remote
             dvc init --no-scm && \
-            dvc add "$latest_model" && \
+            dvc remote add -f storage $DVC_REMOTE_URL && \
             
-            # Add the model and DVC files to git
-            git add "$latest_model" "$latest_model.dvc" && \
+            # Track model with DVC (no push to S3 - will be done by GitHub Actions)
+            dvc add "data/models/final/$(basename $latest_model)" && \
             
-            # Final safety checks for credentials
-            if git diff --cached | grep -i "password\|credential\|secret\|token"; then
-                echo "Error: Potential credentials found in staged changes"
+            # Add both .pth and .dvc files (workflow needs .pth for inference)
+            git add -f "data/models/final/$(basename $latest_model)" && \
+            git add -f "data/models/final/$(basename $latest_model).dvc" && \
+            
+            # Add pipeline code for version tracking
+            mkdir -p airflow/dags && \
+            cp {AIRFLOW_HOME}/dags/train_pipeline.py airflow/dags/ && \
+            git add airflow/dags/train_pipeline.py && \
+            
+            # Multiple safety checks for credentials
+            echo "Running security checks..." && \
+            
+            # Check 1: No .env files
+            if git diff --cached --name-only | grep -i "\.env$"; then
+                echo "Error: Attempting to commit .env file"
                 exit 1
             fi && \
             
-            # Commit with information about the model and DVC tracking
-            git commit -m "Add new trained model with DVC tracking [skip ci]
+            # Check 2: No DVC local configs
+            if git diff --cached --name-only | grep -i "\.dvc/config.local$\|\.dvc/tmp"; then
+                echo "Error: Attempting to commit DVC local config"
+                exit 1
+            fi && \
             
-            Model: $(basename $latest_model)" && \
+            # Check 3: No credential patterns in actual values
+            if git diff --cached | grep -i -v "os.getenv\|os.environ\|secrets\.\|env\[\|get_credentials\|AWS_\|GITHUB_" | grep -i -E "(password|credential|secret|token).*[=:].+"; then
+                echo "Error: Potential hardcoded credentials found"
+                exit 1
+            fi && \
             
-            # Push to git
+            # Commit and push
+            git commit -m "Add model for evaluation
+            
+            Model: $(basename $latest_model)
+            Note: Model files will be pushed to S3 after validation" && \
+            git remote set-url origin "https://$GITHUB_TOKEN@github.com/$GIT_REPO_NAME" && \
             git push origin $GIT_BRANCH && \
             
             # Cleanup
-            cd $HOME && \
-            rm -rf $TEMP_DIR
+            cd /tmp && rm -rf $TEMP_DIR
         """,
         env={
             'GIT_USER_EMAIL': os.getenv('GIT_USER_EMAIL'),
             'GIT_USER_NAME': os.getenv('GIT_USER_NAME'),
             'GIT_BRANCH': os.getenv('GIT_BRANCH', 'dev'),
             'GITHUB_TOKEN': os.getenv('GITHUB_TOKEN'),
-            'GIT_REPO_NAME': os.getenv('GIT_REPO_URL').split('github.com/')[-1],
+            'GIT_REPO_NAME': os.getenv('GIT_REPO_URL').split('github.com/')[-1].rstrip('.git'),
+            'DVC_REMOTE_URL': os.getenv('DVC_REMOTE_URL'),
             'PATH': os.getenv('PATH'),  # Ensure DVC is available
-            'HOME': '/home/airflow'  # Set HOME explicitly
+            'HOME': '/home/airflow'  # Set HOME for git config
         }
     )
 
