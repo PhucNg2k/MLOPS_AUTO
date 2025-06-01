@@ -136,17 +136,23 @@ jobs:
         git config --global user.email "github-actions@github.com"
         git config --global user.name "GitHub Actions"
         
-        # Prepare what to merge to main - only .dvc files and evaluation results
-        git checkout -b temp-merge
+        # Check if main exists and create if needed
+        if git fetch origin main; then
+          echo "Main branch exists, checking out..."
+          git checkout main
+          git pull origin main
+        else
+          echo "Creating new main branch..."
+          git checkout -b main
+        fi
         
-        # Remove everything except .dvc files and evaluation results
-        # First, remove all tracked files
+        # Clean everything except what we want to keep
         git rm -rf .
         
-        # Then restore .dvc files
+        # Restore .dvc files from dev branch
         git checkout dev -- data/models/final/*.dvc
         
-        # Copy evaluation results (if they exist)
+        # Copy evaluation results if they exist
         if [ -d "evaluation_results" ]; then
           mkdir -p evaluation_results_temp
           cp -r evaluation_results/* evaluation_results_temp/
@@ -155,13 +161,8 @@ jobs:
           git add evaluation_results/
         fi
         
-        # Commit the cleaned state
-        git commit -m "Clean state for main branch"
-        
-        # Switch to main and merge the clean state
-        git checkout main
-        git pull origin main
-        git merge --no-ff temp-merge -m "Merge validated model to production
+        # Commit directly to main
+        git commit -m "Update production model
 
         Evaluation Results:
         - Accuracy: $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])')%
@@ -169,10 +170,7 @@ jobs:
         - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
         
         # Push to main
-        git push origin main
-        
-        # Cleanup temp branch
-        git branch -D temp-merge
+        git push -u origin main
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
