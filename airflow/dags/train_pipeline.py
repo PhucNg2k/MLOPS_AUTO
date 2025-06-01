@@ -13,6 +13,7 @@ import boto3
 from airflow.hooks.S3_hook import S3Hook
 from typing import List, Set
 from datetime import datetime
+from airflow.operators.bash import BashOperator
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -294,15 +295,6 @@ def version_partition(partition_path: str, **context) -> None:
         raise
 
 def train_model(partition_path: str, **context) -> str:
-    """
-    Train model on a partition
-    
-    Args:
-        partition_path: Local path to partition data
-        
-    Returns:
-        str: Path to saved model
-    """
     try:
         # Set up model directories - using paths within Airflow workspace
         temp_model_dir = os.path.join(AIRFLOW_HOME, 'data', 'models', 'temp')
@@ -356,69 +348,8 @@ def train_model(partition_path: str, **context) -> str:
             else:
                 raise FileNotFoundError(f"Expected model file not found: {best_model_path}")
 
-            # Setup git for commit
-            git_email = os.getenv('GIT_USER_EMAIL')
-            git_name = os.getenv('GIT_USER_NAME')
-            git_branch = os.getenv('GIT_BRANCH', 'dev')
-            github_token = os.getenv('GITHUB_TOKEN')
-            git_repo_url = os.getenv('GIT_REPO_URL')
-
-            # Verify git environment variables
-            if not all([git_email, git_name, github_token, git_repo_url]):
-                logger.warning("Missing git configuration environment variables. Skipping git operations.")
-                return final_model_path
-
-            logger.info(f"Configuring git with user {git_name} ({git_email})")
-            
-            try:
-                # Initialize git repository if not already initialized
-                if not os.path.exists(os.path.join(git_model_dir, '.git')):
-                    subprocess.run(['git', 'init'], cwd=git_model_dir, check=True)
-                    logger.info("Initialized new git repository")
-                
-                # Configure git globally
-                subprocess.run(['git', 'config', '--global', 'user.email', git_email], check=True)
-                subprocess.run(['git', 'config', '--global', 'user.name', git_name], check=True)
-                
-                # Set up credential helper to store token
-                subprocess.run(['git', 'config', '--global', 'credential.helper', 'store'], check=True)
-                
-                # Save credentials
-                cred_file = os.path.expanduser('~/.git-credentials')
-                with open(cred_file, 'w') as f:
-                    f.write(f"https://x-access-token:{github_token}@github.com\n")
-                os.chmod(cred_file, 0o600)
-
-                # Configure repository
-                try:
-                    subprocess.run(['git', 'remote', 'add', 'origin', git_repo_url], cwd=git_model_dir, check=True)
-                except subprocess.CalledProcessError:
-                    subprocess.run(['git', 'remote', 'set-url', 'origin', git_repo_url], cwd=git_model_dir, check=True)
-                
-                # Try to commit and push
-                try:
-                    # Add and commit the model file
-                    subprocess.run(['git', 'add', final_model_path], cwd=git_model_dir, check=True)
-                    commit_msg = f"Add new model trained on {os.path.basename(partition_path)}"
-                    subprocess.run(['git', 'commit', '-m', commit_msg], cwd=git_model_dir, check=True)
-                    
-                    # Create and checkout the branch if it doesn't exist
-                    try:
-                        subprocess.run(['git', 'checkout', git_branch], cwd=git_model_dir, check=True)
-                    except subprocess.CalledProcessError:
-                        subprocess.run(['git', 'checkout', '-b', git_branch], cwd=git_model_dir, check=True)
-                    
-                    # Push to the specified branch
-                    logger.info(f"Pushing to {git_branch} branch")
-                    subprocess.run(['git', 'push', '-u', 'origin', git_branch], cwd=git_model_dir, check=True)
-                    logger.info("Successfully pushed model to repository")
-                except subprocess.CalledProcessError as e:
-                    logger.warning(f"Git commit/push failed but model was saved successfully: {str(e)}")
-            except Exception as e:
-                logger.warning(f"Git configuration failed but model was saved successfully: {str(e)}")
-
             return final_model_path
-
+            
     except Exception as e:
         logger.error(f"Error in train_model: {str(e)}")
         raise
@@ -598,6 +529,70 @@ with DAG(
         }
     )
 
+    # Add git push task
+    git_push = BashOperator(
+        task_id='git_push',
+        bash_command=f"""
+            # Set HOME and create a temporary working directory
+            export HOME=/home/airflow && \
+            TEMP_DIR=$(mktemp -d) && \
+            
+            # Clone the repository to temporary directory
+            git clone https://$GITHUB_TOKEN@github.com/$GIT_REPO_NAME $TEMP_DIR && \
+            cd $TEMP_DIR && \
+            git checkout $GIT_BRANCH && \
+            
+            # Configure git
+            git config --global user.email "$GIT_USER_EMAIL" && \
+            git config --global user.name "$GIT_USER_NAME" && \
+            
+            # Copy model from Airflow to temp directory
+            mkdir -p data/models/final && \
+            cp -r {PROJECT_ROOT}/data/models/final/* data/models/final/ && \
+            
+            # Setup gitignore
+            echo ".dvc/config.local" >> .gitignore && \
+            git add .gitignore && \
+            
+            # Get the latest model file
+            latest_model=$(ls -t data/models/final/model_*.pth | head -n1) && \
+            
+            # Initialize DVC and add model for tracking (no push)
+            dvc init --no-scm && \
+            dvc add "$latest_model" && \
+            
+            # Add the model and DVC files to git
+            git add "$latest_model" "$latest_model.dvc" && \
+            
+            # Final safety checks for credentials
+            if git diff --cached | grep -i "password\|credential\|secret\|token"; then
+                echo "Error: Potential credentials found in staged changes"
+                exit 1
+            fi && \
+            
+            # Commit with information about the model and DVC tracking
+            git commit -m "Add new trained model with DVC tracking [skip ci]
+            
+            Model: $(basename $latest_model)" && \
+            
+            # Push to git
+            git push origin $GIT_BRANCH && \
+            
+            # Cleanup
+            cd $HOME && \
+            rm -rf $TEMP_DIR
+        """,
+        env={
+            'GIT_USER_EMAIL': os.getenv('GIT_USER_EMAIL'),
+            'GIT_USER_NAME': os.getenv('GIT_USER_NAME'),
+            'GIT_BRANCH': os.getenv('GIT_BRANCH', 'dev'),
+            'GITHUB_TOKEN': os.getenv('GITHUB_TOKEN'),
+            'GIT_REPO_NAME': os.getenv('GIT_REPO_URL').split('github.com/')[-1],
+            'PATH': os.getenv('PATH'),  # Ensure DVC is available
+            'HOME': '/home/airflow'  # Set HOME explicitly
+        }
+    )
+
     # 6. Cleanup (skip evaluation step)
     def cleanup_with_log(**context):
         cleanup(**context)
@@ -623,4 +618,4 @@ with DAG(
     )
 
     # Set task dependencies (no evaluation step)
-    list_partitions_task >> check_partition_task >> download_task >> version_task >> train_task >> cleanup_task >> mark_processed
+    list_partitions_task >> check_partition_task >> download_task >> version_task >> train_task >> git_push >> cleanup_task >> mark_processed

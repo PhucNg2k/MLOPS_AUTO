@@ -113,16 +113,21 @@ jobs:
         git config --global user.email "github-actions@github.com"
         git config --global user.name "GitHub Actions"
         
-        # Copy model and DVC metadata to production
+        # Setup production directory
         mkdir -p data/models/production
         cp ${{ steps.find_model.outputs.model_path }} data/models/production/model_production.pth
         
-        # Copy DVC metadata if exists (just the .dvc file, not the actual data)
-        if [ -f "${{ steps.find_model.outputs.model_path }}.dvc" ]; then
-          cp "${{ steps.find_model.outputs.model_path }}.dvc" data/models/production/model_production.pth.dvc
-        fi
+        # 1. Push actual files to S3 via DVC
+        dvc init --no-scm
+        dvc remote add -f storage ${{ secrets.DVC_REMOTE_URL }}
+        dvc remote modify --local storage access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+        dvc remote modify --local storage secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         
-        # Create a metadata file with training information
+        # Track and push model file to S3
+        dvc add data/models/production/model_production.pth
+        dvc push
+        
+        # Create and push metadata
         cat > data/models/production/training_metadata.json << EOL
         {
           "model_file": "model_production.pth",
@@ -132,19 +137,20 @@ jobs:
           "source_model": "$(basename ${{ steps.find_model.outputs.model_path }})"
         }
         EOL
+        dvc add data/models/production/training_metadata.json
+        dvc push
         
-        # Commit and push to main
-        git add data/models/production/model_production.pth data/models/production/model_production.pth.dvc data/models/production/training_metadata.json evaluation_results/
+        # 2. Only push hashes to GitHub main
+        rm data/models/production/model_production.pth
+        rm data/models/production/training_metadata.json
+        git add data/models/production/*.dvc evaluation_results/
+        
         git commit -m "Deploy model to production [skip ci]
 
         Evaluation Results:
         - Accuracy: $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])')%
         - Status: PASSED
-        - Training Data Hash: ${{ steps.find_model.outputs.training_hash }}
-        
-        To reproduce training:
-        1. Checkout this commit
-        2. Use DVC to get data version: ${{ steps.find_model.outputs.training_hash }}"
+        - Training Data Hash: ${{ steps.find_model.outputs.training_hash }}"
         
         git checkout main
         git pull origin main
