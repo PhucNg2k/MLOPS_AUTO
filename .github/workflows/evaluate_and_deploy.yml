@@ -47,18 +47,24 @@ jobs:
     - name: Find latest model and training data hash
       id: find_model
       run: |
-        latest_model=$(ls -t data/models/final/model_*.pth 2>/dev/null | head -n1)
-        if [ -z "$latest_model" ]; then
-          echo "No model found in data/models/final directory"
+        # Find latest DVC file first
+        latest_dvc=$(ls -t data/models/final/model_*.pth.dvc 2>/dev/null | head -n1)
+        if [ -z "$latest_dvc" ]; then
+          echo "No DVC file found in data/models/final directory"
           exit 1
         fi
-        echo "model_path=$latest_model" >> $GITHUB_OUTPUT
-        echo "Found latest model: $latest_model"
+        
+        # Extract model path from DVC file
+        model_path="${latest_dvc%.dvc}"  # Remove .dvc extension
+        echo "model_path=$model_path" >> $GITHUB_OUTPUT
+        echo "Found latest model DVC: $latest_dvc"
+        
+        # Pull the actual model file using DVC
+        dvc pull "$latest_dvc"
         
         # Extract training data hash from DVC metadata file
-        dvc_meta="${latest_model}.dvc"
-        if [ -f "$dvc_meta" ]; then
-          training_hash=$(cat $dvc_meta | grep -oP 'md5: \K[a-f0-9]+')
+        if [ -f "$latest_dvc" ]; then
+          training_hash=$(cat $latest_dvc | grep -oP 'md5: \K[a-f0-9]+')
           echo "training_hash=$training_hash" >> $GITHUB_OUTPUT
           echo "Found training data hash: $training_hash"
         else
