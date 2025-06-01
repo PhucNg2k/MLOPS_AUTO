@@ -7,6 +7,12 @@ on:
     paths:
       - 'data/models/final/**'  # Catch any changes in models directory
       - 'src/**'                # Keep watching source code changes
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual evaluation requested'
 
 permissions:
   contents: write
@@ -71,14 +77,23 @@ jobs:
     
     - name: Download validation dataset
       run: |
+        # Remove s3:// prefix if present
         BUCKET_PATH="${{ secrets.VALIDATE_BUCKET }}"
-        aws s3 sync s3://$BUCKET_PATH validation_data/
+        BUCKET_NAME=${BUCKET_PATH#"s3://"}
+        
+        # Download validation dataset from bucket root
+        aws s3 sync s3://$BUCKET_NAME validation_data/
         chmod -R 755 validation_data
         
-        if [ ! -e "./validation_data/images" ] || [ ! -e "./validation_data/image_labels.json" ]; then
+        # Verify required files exist
+        if [ ! -e "./validation_data/images" ] || [ ! -e "./validation_data/image_labels.json" ] || [ ! -e "./validation_data/validation_set_stats.json" ]; then
           echo "Error: Required validation files missing"
+          echo "Contents of validation_data:"
+          ls -la ./validation_data/
           exit 1
         fi
+        
+        echo "Successfully downloaded validation dataset with required files"
     
     - name: Run evaluation
       id: evaluate
