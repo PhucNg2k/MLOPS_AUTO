@@ -5,8 +5,8 @@ on:
     branches:
       - dev
     paths:
-      - 'data/models/final/**'
-      - 'src/**'
+      - 'data/models/final/**'  # Catch any changes in models directory
+      - 'src/**'                # Keep watching source code changes
 
 permissions:
   contents: write
