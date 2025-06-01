@@ -227,10 +227,10 @@ def evaluate(model_path, data_dir, output_dir, threshold=0.85):
     
     # Save summary metrics
     metrics = {
-        'test_accuracy': accuracy,
-        'threshold': threshold,
+        'test_accuracy': round(accuracy, 2),
+        'threshold': round(threshold, 2),
         'validation_passed': validation_passed,
-        'per_class_accuracy': class_accuracies,
+        'per_class_accuracy': {k: round(v, 2) for k, v in class_accuracies.items()},
         'total_samples': total,
         'class_distribution': {class_names[i]: class_total[i] for i in range(num_classes)}
     }

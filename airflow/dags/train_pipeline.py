@@ -107,7 +107,7 @@ def download_partition(partition_path: str) -> str:
     Args:
         partition_path: Name of partition folder (e.g. 'partition_1')
     Returns:
-        Local path to the downloaded partition
+        str: Path to the downloaded partition
     """
     if not partition_path:
         raise ValueError("partition_path cannot be None")
@@ -207,13 +207,36 @@ def download_partition(partition_path: str) -> str:
             else:
                 logger.warning("Ignoring utime warnings as files were downloaded successfully")
         
-        # Basic validation of downloaded data
+        # Validate downloaded data structure
         required_files = ['images', 'image_labels.json', 'partition_stats.json']
         missing_files = [f for f in required_files if not os.path.exists(os.path.join(local_path, f))]
         if missing_files:
             raise ValueError(f"Download incomplete. Missing files: {missing_files}")
+            
+        # Validate that all images in image_labels.json exist
+        try:
+            with open(os.path.join(local_path, 'image_labels.json'), 'r') as f:
+                image_labels = json.load(f)
+            
+            missing_images = []
+            for image_name in image_labels.keys():
+                image_path = os.path.join(local_path, 'images', image_name)
+                if not os.path.exists(image_path):
+                    missing_images.append(image_name)
+            
+            if missing_images:
+                logger.error(f"Found {len(missing_images)} missing images:")
+                for img in missing_images[:10]:  # Show first 10 missing images
+                    logger.error(f"- {img}")
+                if len(missing_images) > 10:
+                    logger.error(f"... and {len(missing_images) - 10} more")
+                raise ValueError(f"Partition has {len(missing_images)} missing images referenced in image_labels.json")
+            
+            logger.info(f"Successfully validated {len(image_labels)} images")
+        except json.JSONDecodeError:
+            raise ValueError("Failed to parse image_labels.json")
         
-        logger.info(f"Successfully downloaded partition at {local_path}")
+        logger.info(f"Successfully downloaded and validated partition at {local_path}")
         return local_path
         
     except Exception as e:
