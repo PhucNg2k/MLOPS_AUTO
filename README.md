@@ -1,177 +1,181 @@
-# MLOps Animal Classification Project
+# Animal Classification MLOps Pipeline
 
-An end-to-end MLOps pipeline for animal image classification using Airflow, DVC, PyTorch, and AWS S3. The pipeline automates data versioning, model training, evaluation, and deployment.
+This project implements a complete MLOps pipeline for training and deploying an animal classification model. The pipeline automates the entire workflow from data preparation to model deployment, featuring:
 
----
-
-## Project Structure
-
-```
-.
-├── airflow/                  # Airflow home directory
-│   ├── dags/                # Airflow DAG definitions
-│   ├── logs/                # Airflow logs
-│   ├── plugins/             # Airflow plugins
-│   └── config/              # Airflow configuration
-├── src/                     # Source code (train.py, evaluate.py, model.py)
-├── utils/                   # Utility scripts (DVC, data, upload, etc.)
-├── data/                    # Data directory (raw, processed, dvc_store)
-├── models/                  # Trained models
-├── .dvc/                    # DVC configuration
-├── .github/                 # GitHub Actions workflows
-├── docker-compose.yaml      # Docker services configuration
-├── Dockerfile               # Docker image definition
-├── requirements.txt         # Python dependencies
-└── README.md                # Project documentation
-```
-
----
+- Automated training on new data partitions using Airflow
+- Model versioning with DVC and AWS S3
+- Experiment tracking with MLflow
+- Automated evaluation and deployment using GitHub Actions
+- Quality gates to ensure model performance
 
 ## Prerequisites
-- Docker and Docker Compose
-- AWS Account with S3 access
-- Python 3.10 (for local development)
-- Git (for version control)
-- DVC (for data version control)
 
----
+- Python 3.10
+- Docker Desktop with WSL2 (for Windows users)
+- AWS Account with S3 bucket
+- GitHub Account (for forking and Actions)
 
-## Setup
+## Architecture
 
-### 1. Clone the repository
-```powershell
-git clone <repository-url>
-cd <project-directory>
+### Training Pipeline (Airflow)
+- Monitors S3 for new training data partitions
+- Automatically triggers training on new data
+- Versions models and pushes to S3
+- Tracks experiments with MLflow
+
+### Evaluation & Deployment (GitHub Actions)
+- Triggered by new model versions
+- Downloads model from S3
+- Runs evaluation on validation dataset
+- Auto-merges to main if accuracy > 85%
+- Creates issues for failed evaluations
+
+### Storage & Versioning
+- AWS S3: Stores models and datasets
+- DVC: Tracks model versions
+- GitHub: Stores code and .dvc files
+- MLflow: Tracks experiments and metrics
+
+## Initial Setup
+
+1. **Fork and Clone the Repository**
+   - Fork this repository to your GitHub account
+   - Clone your forked repository:
+```bash
+git clone https://github.com/your-username/your-repo.git
+cd your-repo
 ```
 
-### 2. Create a `.env` file in the project root
-```env
-AIRFLOW_UID=50000
-AIRFLOW_GID=0
-AIRFLOW_HOME=/opt/airflow
+2. **Configure GitHub Repository**
+   - Go to your forked repository's Settings
+   - Under "Secrets and variables" > "Actions"
+   - Add the following repository secrets:
+     - `AWS_ACCESS_KEY_ID`
+     - `AWS_SECRET_ACCESS_KEY`
+     - `AWS_DEFAULT_REGION`
+     - `VALIDATE_BUCKET`
+     - `DVC_REMOTE_URL`
+     - `GITHUB_TOKEN`
+
+## Setup Environment
+
+1. **Create Environment File**
+
+Create a `.env` file in the project root:
+```bash
+# AWS Configuration
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_DEFAULT_REGION=your_region
-BUCKET_NAME=your-bucket-name
-TRAIN_BUCKET=s3://${BUCKET_NAME}/train
-VALIDATE_BUCKET=s3://${BUCKET_NAME}/validate
-DVC_REMOTE_URL=s3://${BUCKET_NAME}/dvc
-GIT_USER_EMAIL=your_email@example.com
-GIT_USER_NAME=your_github_username
-GIT_REPO_URL=https://github.com/youruser/yourrepo
-GIT_BRANCH=dev
+
+# S3 Buckets
+TRAIN_BUCKET=s3://your-bucket/train    # For training partitions
+VALIDATE_BUCKET=s3://your-bucket       # For validation dataset
+DVC_REMOTE_URL=s3://your-bucket/models # For model storage
+
+# GitHub Configuration
 GITHUB_TOKEN=your_github_token
-PROJECT_DATA_DIR=./data
-MODEL_STORE_DIR=./models
+GIT_USER_EMAIL=your.email@example.com
+GIT_USER_NAME="Your Name"
+GIT_REPO_URL=https://github.com/username/repo
+GIT_BRANCH=dev
+
+# MLflow Configuration
+MLFLOW_TRACKING_URI=http://mlflow:5000
 ```
 
-### 3. Create required directories (if not using Docker Compose volumes)
-```powershell
-mkdir airflow\dags airflow\logs airflow\plugins airflow\config
-mkdir data\raw data\processed data\dvc_store
-mkdir models
+2. **Install Data Preparation Tools**
+```bash
+# Make sure you have Python 3.10 installed
+python --version  # Should show Python 3.10.x
+
+# Create and activate virtual environment (optional but recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install required packages for data preparation utils
+pip install boto3 kagglehub pillow tqdm pandas
 ```
 
----
+## Data Preparation
 
-## Running the Project
+1. **Download Dataset**
+```bash
+# Download and clean Animals-10 dataset
+python utils/download_animals10.py
+```
 
-### 1. Build and start all services
-```powershell
+2. **Create Training Partitions**
+```bash
+# Split dataset into training partitions
+python utils/partition_dataset.py
+```
+
+3. **Prepare Validation Set**
+```bash
+# Create and upload validation dataset
+python utils/prepare_validation_set.py
+```
+
+4. **Upload First Training Partition**
+```bash
+# Upload first partition to start training
+python utils/upload_partitions.py --partition_path data/training_data/partition_1
+```
+
+## Docker Setup
+
+1. **WSL2 Setup (Windows Only)**
+   - Install WSL2:
+     ```powershell
+     # Run in PowerShell as Administrator
+     wsl --install
+     wsl --set-default-version 2
+     ```
+   - Configure Docker Desktop to use WSL2 backend
+   - Clone/move project to WSL2 filesystem for better performance
+
+2. **Build and Start Services**
+```bash
+# Build Docker images
 docker compose build
-```
 
-### 2. Initialize Airflow and create admin user
-```powershell
+# Initialize Airflow
 docker compose run airflow-init
-```
 
-### 3. Start all services in detached mode
-```powershell
+# Start all services
 docker compose up -d
 ```
 
-### 4. Access the Airflow web interface
-- URL: http://localhost:8080
-- Username: airflow (or as set in your .env)
-- Password: airflow (or as set in your .env)
+Access service UIs at:
+- Airflow: http://localhost:8080 (airflow/airflow)
+- MLflow: http://localhost:5000
 
----
+## Using the Pipeline
 
-## Data Pipeline Usage
-
-### 1. Download and partition the dataset
-```powershell
-python utils/download_animals10.py --output_dir data/raw
-python utils/partition_dataset.py --source_dir data/raw --output_dir data/processed --num_partitions 4
+### Adding New Training Data
+1. Prepare new data partition
+2. Upload to S3:
+```bash
+python utils/upload_partitions.py --partition_path data/training_data/partition_X
 ```
+3. Airflow will automatically detect and train on new data
+4. GitHub Actions will evaluate the new model
 
-### 2. Prepare and upload validation dataset
-```powershell
-python utils/prepare_validation_set.py --source_dir data/raw --bucket_path $env:VALIDATE_BUCKET
-```
+### Manual Model Evaluation
+1. Go to GitHub Actions
+2. Select "Evaluate and Deploy Model"
+3. Click "Run workflow"
+4. Select dev branch
+5. Add reason for manual run
 
-### 3. Upload training partitions to S3
-```powershell
-python utils/upload_partitions.py --partition_path data/processed/partition_1 --bucket_path $env:TRAIN_BUCKET
-# Repeat for each partition
-```
+### Accessing Models
+- Latest production model: See main branch .dvc files
+- Historical models: Check dev branch history
+- Download specific version: Use DVC with hash from .dvc file to checkout at Airflow server
 
----
-
-## Data Version Control (DVC)
-
-```powershell
-python utils/dvc_operations.py --operation init
-python utils/dvc_operations.py --operation track --partition_dir data/processed/partition_1
-python utils/dvc_operations.py --operation verify
-```
-
----
-
-## Training Pipeline (Airflow)
-
-- The pipeline is event-driven: when a new partition is uploaded to S3, Airflow detects it and runs the pipeline.
-- Steps:
-  1. Detect new partition in S3
-  2. Download and version with DVC
-  3. Train the model
-  4. Evaluate on validation set
-  5. Push model to GitHub if accuracy threshold is met
-- Monitor the pipeline via the Airflow UI at http://localhost:8080
-
----
-
-## Troubleshooting
-
-- **Permission Issues:**
-  - Ensure `AIRFLOW_UID=50000` and `AIRFLOW_GID=0` in `.env` (no comments on the line)
-  - Use `docker compose down --remove-orphans` if you see orphan container errors
-- **AWS/DVC Issues:**
-  - Check your AWS credentials and S3 bucket permissions
-  - Run: `python utils/dvc_operations.py --operation verify`
-- **General:**
-  - Check logs: `docker compose logs -f`
-  - Ensure all required directories exist
-  - Ensure environment variables are set
-
----
-
-## Development
-- Place new DAGs in `airflow/dags/` (auto-detected by Airflow)
-- Core ML code in `src/`
-- Utilities in `utils/`
-- Data in `data/`, models in `models/`
-
----
-
-## Contributing
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
----
-
-## License
-[Your License]
+### Monitoring
+- Training progress: MLflow UI
+- Pipeline status: Airflow UI
+- Model evaluations: GitHub Actions logs
+- Production models: Main branch .dvc files
