@@ -170,7 +170,7 @@ jobs:
         
         # Stage and commit if there are changes
         echo "Adding model DVC file and evaluation results..."
-        git add data/models/final/*.dvc 
+        git add -f data/models/final/*.dvc  # Force add DVC file from ignored directory
         git add evaluation_results/ --force  # Force add to ensure it's included
         
         if git diff --staged --quiet; then
