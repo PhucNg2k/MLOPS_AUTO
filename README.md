@@ -46,7 +46,29 @@ git clone https://github.com/your-username/your-repo.git
 cd your-repo
 ```
 
-2. **Configure GitHub Repository**
+2. **Initialize DVC**
+```bash
+# Install DVC if not already installed
+pip install dvc[s3]
+
+# Initialize DVC in the repository
+dvc init
+
+# Configure DVC remote storage (same as Airflow's DVC_REMOTE_URL)
+dvc remote add -d storage s3://your-bucket/models
+dvc remote modify storage access_key_id ${AWS_ACCESS_KEY_ID}
+dvc remote modify storage secret_access_key ${AWS_SECRET_ACCESS_KEY}
+dvc remote modify storage region ${AWS_DEFAULT_REGION}
+
+# The above commands will create .dvc/config - make sure to not commit sensitive info
+echo ".dvc/config.local" >> .gitignore
+
+# Note: DVC will create a local cache in .dvc/cache or data/dvc-store
+# This cache stores local copies of tracked files to avoid repeated downloads
+# The cache is independent from Airflow's DVC cache
+```
+
+3. **Configure GitHub Repository**
    - Go to your forked repository's Settings
    - Under "Secrets and variables" > "Actions"
    - Add the following repository secrets:
@@ -120,7 +142,7 @@ python utils/prepare_validation_set.py
 4. **Upload First Training Partition**
 ```bash
 # Upload first partition to start training
-python utils/upload_partitions.py --partition_path data/training_data/partition_1
+python utils/upload_partitions.py --partition_path data/processed/partition_2
 ```
 
 ## Docker Setup
@@ -172,7 +194,20 @@ python utils/upload_partitions.py --partition_path data/training_data/partition_
 ### Accessing Models
 - Latest production model: See main branch .dvc files
 - Historical models: Check dev branch history
-- Download specific version: Use DVC with hash from .dvc file to checkout at Airflow server
+- Download specific version:
+```bash
+# Switch to the desired branch (main for production models)
+git checkout main
+
+# Pull latest .dvc files
+git pull origin main
+
+# Download the model using DVC (will store in local cache first)
+dvc pull data/models/final/model_YYYYMMDD_HHMMSS.pth.dvc
+
+# The model file will be available at data/models/final/model_YYYYMMDD_HHMMSS.pth
+# A copy is also kept in your local DVC cache (dvc-store) for future use
+```
 
 ### Monitoring
 - Training progress: MLflow UI
