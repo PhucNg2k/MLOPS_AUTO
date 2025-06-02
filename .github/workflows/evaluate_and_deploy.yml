@@ -155,8 +155,8 @@ jobs:
         cp -r evaluation_results/* "$TEMP_DIR/evaluation_results/"
         
         # Reset working directory but don't commit
-        git rm -rf . --cached
         git clean -fdx -e evaluation_results/  # Exclude evaluation_results from cleaning
+        git rm -rf . --cached
         
         # Create necessary directories
         mkdir -p data/models/final
