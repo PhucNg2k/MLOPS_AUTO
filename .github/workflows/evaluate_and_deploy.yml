@@ -146,31 +146,41 @@ jobs:
           git checkout -b main
         fi
         
-        # Clean everything except what we want to keep
-        git rm -rf .
+        # Reset working directory but don't commit
+        git rm -rf . --cached
+        git clean -fdx
         
-        # Restore .dvc files from dev branch
+        # Create necessary directories
+        mkdir -p data/models/final evaluation_results
+        
+        # Copy new model's .dvc file from dev
         git checkout dev -- data/models/final/*.dvc
         
         # Copy evaluation results if they exist
         if [ -d "evaluation_results" ]; then
-          mkdir -p evaluation_results_temp
-          cp -r evaluation_results/* evaluation_results_temp/
-          rm -rf evaluation_results
-          mv evaluation_results_temp evaluation_results
-          git add evaluation_results/
+          cp -r evaluation_results/* evaluation_results/
         fi
         
-        # Commit directly to main
+        # Stage all files for single commit
+        git add data/models/final/*.dvc evaluation_results/
+        
+        # Single commit with proper JSON handling
         git commit -m "Update production model
 
         Evaluation Results:
-        - Accuracy: $(echo ${{ steps.evaluate.outputs.metrics }} | python -c 'import sys,json; print(json.load(sys.stdin)["test_accuracy"])')%
+        - Accuracy: $(echo '${{ steps.evaluate.outputs.metrics }}' | python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    print(f"{data[\"test_accuracy\"]}%")
+except Exception as e:
+    print("Error parsing metrics JSON")
+')
         - Status: PASSED
         - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
         
-        # Push to main
-        git push -u origin main
+        # Force push to main since we want to reset state but keep history
+        git push -f origin main
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
