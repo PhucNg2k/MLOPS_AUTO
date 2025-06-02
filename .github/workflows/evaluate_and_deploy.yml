@@ -156,10 +156,8 @@ jobs:
         # Copy new model's .dvc file from dev
         git checkout dev -- data/models/final/*.dvc
         
-        # Copy evaluation results if they exist
-        if [ -d "evaluation_results" ]; then
-          cp -r evaluation_results/* evaluation_results/
-        fi
+        # Copy evaluation results
+        cp -r evaluation_results/* .
         
         # Stage all files for single commit
         git add data/models/final/*.dvc evaluation_results/
@@ -168,14 +166,7 @@ jobs:
         git commit -m "Update production model
 
         Evaluation Results:
-        - Accuracy: $(echo '${{ steps.evaluate.outputs.metrics }}' | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    print(f"{data[\"test_accuracy\"]}%")
-except Exception as e:
-    print("Error parsing metrics JSON")
-')
+        - Accuracy: $(echo '${{ steps.evaluate.outputs.metrics }}' | python3 -c 'import sys, json; try: data = json.loads(sys.stdin.read()); print(f"{data[\"test_accuracy\"]}%"); except Exception as e: print("Error parsing metrics JSON")')
         - Status: PASSED
         - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
         
