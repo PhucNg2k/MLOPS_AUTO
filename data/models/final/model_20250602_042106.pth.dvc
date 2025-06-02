@@ -1,0 +1,6 @@
+outs:
+- md5: 2eaa4586e7f220b06f519df22d262d9d
+  size: 314057969
+  isexec: true
+  hash: md5
+  path: model_20250602_042106.pth
