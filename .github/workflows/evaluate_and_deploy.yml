@@ -146,36 +146,31 @@ jobs:
           echo "Creating new main branch..."
           git checkout -b main
         fi
-
-        # First stage and backup current evaluation results
-        echo "Backing up evaluation results..."
-        cp -r evaluation_results/* /tmp/
+        
+        # Create temp directories outside git workspace and preserve files
+        TEMP_DIR="/tmp/model_backup_$$"
+        mkdir -p "$TEMP_DIR/evaluation_results" "$TEMP_DIR/models"
         
         # Reset working directory but don't commit
         git rm -rf . --cached
-        git clean -fdx
+        git clean -fdx -e evaluation_results/  # Exclude evaluation_results from cleaning
         
-        # Create necessary directories and restore files
-        echo "Restoring files..."
-        mkdir -p data/models/final evaluation_results
-        cp -r /tmp/* evaluation_results/
+        # Create necessary directories
+        mkdir -p data/models/final
         
         # Get the new model's DVC file from dev
         echo "Getting latest model DVC file..."
         git checkout dev -- "data/models/final/$(basename ${{ steps.find_model.outputs.model_path }}).dvc"
         
-        # Stage both model and evaluation results
-        echo "Staging files..."
-        git add data/models/final/*.dvc
-        git add evaluation_results/
-
-        # Commit and push if there are changes
+        # Stage and commit if there are changes
+        git add data/models/final/*.dvc evaluation_results/
         if git diff --staged --quiet; then
           echo "No changes to commit"
           exit 0
         else
-          echo "Committing changes..."
+          # Use the accuracy value from check_eval step
           git commit -m "Update production model - Accuracy: ${{ steps.check_eval.outputs.accuracy }}% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
+          # Force push to main since we want to reset state but keep history
           git push -f origin main
         fi
     
