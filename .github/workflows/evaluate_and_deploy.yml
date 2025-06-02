@@ -146,18 +146,19 @@ jobs:
           git checkout -b main
         fi
         
+        # Save current evaluation results
+        mv evaluation_results evaluation_results_backup
+        
         # Reset working directory but don't commit
         git rm -rf . --cached
         git clean -fdx
         
-        # Create necessary directories
-        mkdir -p data/models/final evaluation_results
+        # Create necessary directories and restore results
+        mkdir -p data/models/final
+        mv evaluation_results_backup evaluation_results
         
         # Copy new model's .dvc file from dev
         git checkout dev -- data/models/final/*.dvc
-        
-        # Copy evaluation results
-        cp -r evaluation_results/* .
         
         # Stage all files for single commit
         git add data/models/final/*.dvc evaluation_results/
