@@ -1,0 +1,6 @@
+outs:
+- md5: 84b3e22863e42cb55d9516facbf56621
+  size: 314057969
+  isexec: true
+  hash: md5
+  path: model_20250602_092230.pth
