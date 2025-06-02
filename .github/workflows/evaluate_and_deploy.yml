@@ -146,10 +146,26 @@ jobs:
           git checkout -b main
         fi
         
-        # Create temp directories and preserve files
-        mkdir -p temp_backup/evaluation_results temp_backup/models
-        mv evaluation_results/* temp_backup/evaluation_results/
-        mv data/models/final/*.dvc temp_backup/models/
+        # Create temp directories outside git workspace and preserve files
+        TEMP_DIR="/tmp/model_backup_$$"
+        mkdir -p "$TEMP_DIR/evaluation_results" "$TEMP_DIR/models"
+        
+        # Copy files with error checking
+        if [ -d "evaluation_results" ] && [ "$(ls -A evaluation_results 2>/dev/null)" ]; then
+          echo "Backing up evaluation results..."
+          cp -r evaluation_results/* "$TEMP_DIR/evaluation_results/"
+        else
+          echo "No evaluation results found to backup"
+          exit 1
+        fi
+        
+        if [ -d "data/models/final" ] && [ "$(ls -A data/models/final/*.dvc 2>/dev/null)" ]; then
+          echo "Backing up model DVC files..."
+          cp -r data/models/final/*.dvc "$TEMP_DIR/models/"
+        else
+          echo "No model DVC files found to backup"
+          exit 1
+        fi
         
         # Reset working directory but don't commit
         git rm -rf . --cached
@@ -157,9 +173,16 @@ jobs:
         
         # Create necessary directories and restore files
         mkdir -p data/models/final evaluation_results
-        mv temp_backup/evaluation_results/* evaluation_results/
-        mv temp_backup/models/* data/models/final/
-        rm -rf temp_backup
+        
+        # Restore files with error checking
+        echo "Restoring evaluation results..."
+        cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/
+        
+        echo "Restoring model DVC files..."
+        cp -r "$TEMP_DIR/models/"* data/models/final/
+        
+        # Clean up temp directory
+        rm -rf "$TEMP_DIR"
         
         # Stage all files for single commit
         git add data/models/final/*.dvc evaluation_results/
