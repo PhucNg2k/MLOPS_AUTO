@@ -175,24 +175,10 @@ jobs:
         echo "Files staged for commit:"
         git status --porcelain
         
-        # Compare evaluation results if they exist in previous commit
-        echo "Checking evaluation results changes..."
-        if git cat-file -e HEAD:evaluation_results/eval_metrics.json 2>/dev/null; then
-          echo "Previous evaluation metrics:"
-          git show HEAD:evaluation_results/eval_metrics.json
-          echo "New evaluation metrics:"
-          cat evaluation_results/eval_metrics.json
-        fi
-        
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-          exit 0
-        else
-          # Use the accuracy value from check_eval step
-          git commit -m "Update production model - Accuracy: ${{ steps.check_eval.outputs.accuracy }}% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
-          # Force push to main since we want to reset state but keep history
-          git push -f origin main
-        fi
+        # Always commit and push the new files
+        echo "Committing new model and evaluation results..."
+        git commit -m "Update production model - Accuracy: ${{ steps.check_eval.outputs.accuracy }}% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
+        git push -f origin main
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
