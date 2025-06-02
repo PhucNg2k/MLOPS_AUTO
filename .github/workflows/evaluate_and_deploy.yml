@@ -179,7 +179,7 @@ jobs:
         cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/
         
         echo "Restoring model DVC files..."
-        cp -r "$TEMP_DIR/models/"* data/models/final/
+        git checkout dev -- "data/models/final/$(basename ${{ steps.find_model.outputs.model_path }}).dvc"
         
         # Clean up temp directory
         rm -rf "$TEMP_DIR"
