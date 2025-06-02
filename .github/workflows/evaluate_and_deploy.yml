@@ -151,6 +151,9 @@ jobs:
         TEMP_DIR="/tmp/model_backup_$$"
         mkdir -p "$TEMP_DIR/evaluation_results" "$TEMP_DIR/models"
         
+        # Backup evaluation results before cleaning
+        cp -r evaluation_results/* "$TEMP_DIR/evaluation_results/"
+        
         # Reset working directory but don't commit
         git rm -rf . --cached
         git clean -fdx -e evaluation_results/  # Exclude evaluation_results from cleaning
@@ -158,12 +161,18 @@ jobs:
         # Create necessary directories
         mkdir -p data/models/final
         
+        # Restore evaluation results if needed
+        cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/ 2>/dev/null || true
+        
         # Get the new model's DVC file from dev
         echo "Getting latest model DVC file..."
         git checkout dev -- "data/models/final/$(basename ${{ steps.find_model.outputs.model_path }}).dvc"
         
         # Stage and commit if there are changes
-        git add data/models/final/*.dvc evaluation_results/
+        echo "Adding model DVC file and evaluation results..."
+        git add data/models/final/*.dvc 
+        git add evaluation_results/ --force  # Force add to ensure it's included
+        
         if git diff --staged --quiet; then
           echo "No changes to commit"
           exit 0
