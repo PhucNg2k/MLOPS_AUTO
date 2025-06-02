@@ -149,18 +149,23 @@ jobs:
         
         # Create temp directories outside git workspace and preserve files
         TEMP_DIR="/tmp/model_backup_$$"
-        mkdir -p "$TEMP_DIR/evaluation_results" "$TEMP_DIR/models"
+        model_name=$(basename ${{ steps.find_model.outputs.model_path }} .pth)
+        eval_dir="evaluation_results_${model_name}"
         
-        # Backup evaluation results before cleaning
-        cp -r evaluation_results/* "$TEMP_DIR/evaluation_results/"
+        # Create both temp and target directories
+        mkdir -p "$TEMP_DIR/$eval_dir"
+        
+        # Copy evaluation results to temp dir with new name
+        cp -r evaluation_results/* "$TEMP_DIR/$eval_dir/"
         
         # Reset working directory
         git clean -fdx  # Clean everything
         git rm -rf .    # Remove everything from git
         
-        # Create necessary directories and restore files
-        mkdir -p data/models/final evaluation_results
-        cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/ 2>/dev/null || true
+        # Create necessary directories and restore with new name
+        mkdir -p data/models/final 
+        mkdir -p "$eval_dir"
+        cp -r "$TEMP_DIR/$eval_dir/"* "$eval_dir/"
         
         # Get the new model's DVC file from dev
         echo "Getting latest model DVC file..."
@@ -169,7 +174,7 @@ jobs:
         # Force add files even if ignored
         echo "Adding model DVC file and evaluation results..."
         git add -f data/models/final/*.dvc  # Force add DVC file from ignored directory
-        git add -f evaluation_results/detailed_metrics.csv evaluation_results/eval_metrics.json  # Force add evaluation files
+        git add -f "$eval_dir"  # Force add the model-specific evaluation directory
         
         # Show what's being added
         echo "Files staged for commit:"
