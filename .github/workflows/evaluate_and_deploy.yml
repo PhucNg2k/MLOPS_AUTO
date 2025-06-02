@@ -163,6 +163,9 @@ jobs:
         
         # Restore evaluation results if needed
         cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/ 2>/dev/null || true
+
+        # Clean old model DVC files
+        rm -f data/models/final/*.dvc
         
         # Get the new model's DVC file from dev
         echo "Getting latest model DVC file..."
