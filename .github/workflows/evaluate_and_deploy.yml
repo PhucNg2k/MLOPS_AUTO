@@ -175,10 +175,18 @@ jobs:
         echo "Files staged for commit:"
         git status --porcelain
         
-        # Always commit and push the new files
-        echo "Committing new model and evaluation results..."
-        git commit -m "Update production model - Accuracy: ${{ steps.check_eval.outputs.accuracy }}% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
-        git push -f origin main
+        # Check if there are any changes to commit
+        if git status --porcelain | grep -q '^'; then
+          # Changes exist, commit and push
+          echo "Committing new model and evaluation results..."
+          git commit -m "Update production model - Accuracy: ${{ steps.check_eval.outputs.accuracy }}% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
+          git push -f origin main
+          echo "Successfully updated main branch"
+        else
+          echo "No changes detected in files. Skipping commit."
+          # Exit successfully since this is an expected case
+          exit 0
+        fi
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
