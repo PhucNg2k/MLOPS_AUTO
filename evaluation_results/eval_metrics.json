@@ -1,0 +1,20 @@
+{
+    "test_accuracy": 94.36,
+    "threshold": 85.0,
+    "validation_passed": true,
+    "per_class_accuracy": {
+        "butterfly": 95.65,
+        "cat": 95.45,
+        "elephant": 94.44,
+        "sheep": 91.89,
+        "spider": 93.75
+    },
+    "total_samples": 195,
+    "class_distribution": {
+        "butterfly": 46,
+        "cat": 44,
+        "elephant": 36,
+        "sheep": 37,
+        "spider": 32
+    }
+}
