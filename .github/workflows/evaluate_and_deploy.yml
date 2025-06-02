@@ -187,11 +187,22 @@ jobs:
         # Stage all files for single commit
         git add data/models/final/*.dvc evaluation_results/
         
+        # Get accuracy from metrics file for commit message
+        ACCURACY=$(python3 -c '
+        import sys, json
+        try:
+            with open("evaluation_results/eval_metrics.json") as f:
+                data = json.load(f)
+                print(f"{data[\"test_accuracy\"]}%")
+        except Exception as e:
+            print("Error reading metrics")
+        ')
+        
         # Single commit with proper JSON handling
         git commit -m "Update production model
 
         Evaluation Results:
-        - Accuracy: $(echo '${{ steps.evaluate.outputs.metrics }}' | python3 -c 'import sys, json; try: data = json.loads(sys.stdin.read()); print(f"{data[\"test_accuracy\"]}%"); except Exception as e: print("Error parsing metrics JSON")')
+        - Accuracy: $ACCURACY
         - Status: PASSED
         - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
         
