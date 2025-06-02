@@ -53,8 +53,8 @@ jobs:
     - name: Find latest model and download from S3
       id: find_model
       run: |
-        # Find latest DVC file first
-        latest_dvc=$(ls -t data/models/final/model_*.pth.dvc 2>/dev/null | head -n1)
+        # Find latest DVC file first by modification time
+        latest_dvc=$(find data/models/final -name "model_*.pth.dvc" -type f -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2)
         if [ -z "$latest_dvc" ]; then
           echo "No DVC file found in data/models/final directory"
           exit 1
@@ -184,14 +184,17 @@ jobs:
         # Clean up temp directory
         rm -rf "$TEMP_DIR"
         
-        # Stage all files for single commit
+        # Stage and commit if there are changes
         git add data/models/final/*.dvc evaluation_results/
-        
-        # Use the accuracy value we already calculated
-        git commit -m "Update production model - Accuracy: $current_accuracy% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
-        
-        # Force push to main since we want to reset state but keep history
-        git push -f origin main
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        else
+          # Use the accuracy value we already calculated
+          git commit -m "Update production model - Accuracy: $current_accuracy% - Model: $(basename ${{ steps.find_model.outputs.model_path }})"
+          # Force push to main since we want to reset state but keep history
+          git push -f origin main
+        fi
     
     - name: Create issue if failed
       if: steps.check_eval.outputs.merge == 'false'
