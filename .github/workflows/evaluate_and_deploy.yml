@@ -154,18 +154,13 @@ jobs:
         # Backup evaluation results before cleaning
         cp -r evaluation_results/* "$TEMP_DIR/evaluation_results/"
         
-        # Reset working directory but don't commit
-        git clean -fdx -e evaluation_results/  # Exclude evaluation_results from cleaning
-        git rm -rf . --cached
+        # Reset working directory
+        git clean -fdx  # Clean everything
+        git rm -rf .    # Remove everything from git
         
-        # Create necessary directories
-        mkdir -p data/models/final
-        
-        # Restore evaluation results if needed
+        # Create necessary directories and restore files
+        mkdir -p data/models/final evaluation_results
         cp -r "$TEMP_DIR/evaluation_results/"* evaluation_results/ 2>/dev/null || true
-
-        # Clean old model DVC files
-        rm -f data/models/final/*.dvc
         
         # Get the new model's DVC file from dev
         echo "Getting latest model DVC file..."
@@ -173,9 +168,8 @@ jobs:
         
         # Stage and commit if there are changes
         echo "Adding model DVC file and evaluation results..."
-        git rm -r --cached evaluation_results/ || true  # Remove from index first
         git add -f data/models/final/*.dvc  # Force add DVC file from ignored directory
-        git add evaluation_results/ --force  # Force add to ensure it's included
+        git add -f evaluation_results/detailed_metrics.csv evaluation_results/eval_metrics.json  # Add specific evaluation files
         
         if git diff --staged --quiet; then
           echo "No changes to commit"
