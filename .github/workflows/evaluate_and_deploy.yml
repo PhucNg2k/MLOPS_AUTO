@@ -166,10 +166,23 @@ jobs:
         echo "Getting latest model DVC file..."
         git checkout dev -- "data/models/final/$(basename ${{ steps.find_model.outputs.model_path }}).dvc"
         
-        # Stage and commit if there are changes
+        # Force add files even if ignored
         echo "Adding model DVC file and evaluation results..."
         git add -f data/models/final/*.dvc  # Force add DVC file from ignored directory
-        git add -f evaluation_results/detailed_metrics.csv evaluation_results/eval_metrics.json  # Add specific evaluation files
+        git add -f evaluation_results/detailed_metrics.csv evaluation_results/eval_metrics.json  # Force add evaluation files
+        
+        # Show what's being added
+        echo "Files staged for commit:"
+        git status --porcelain
+        
+        # Compare evaluation results if they exist in previous commit
+        echo "Checking evaluation results changes..."
+        if git cat-file -e HEAD:evaluation_results/eval_metrics.json 2>/dev/null; then
+          echo "Previous evaluation metrics:"
+          git show HEAD:evaluation_results/eval_metrics.json
+          echo "New evaluation metrics:"
+          cat evaluation_results/eval_metrics.json
+        fi
         
         if git diff --staged --quiet; then
           echo "No changes to commit"
